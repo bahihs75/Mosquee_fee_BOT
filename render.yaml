@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: telegram-reimbursement-bot
+    env: python
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    pythonVersion: 3.11.9
+    healthCheckPath: /health
+    disk:
+      name: bot-persistence
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_GROUP_ID
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        generateValue: true
+      - key: CASHIER_TARGET_TYPE
+        value: user
+      - key: CASHIER_CHAT_ID
+        sync: false
+      - key: DB_SSLMODE
+        value: require
