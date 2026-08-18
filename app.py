@@ -233,6 +233,28 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text("تم إلغاء الإدخال الحالي.", reply_markup=main_menu())
 
 
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Skip optional request fields during the private request wizard."""
+    if not private_chat(update):
+        return
+    state = pending.get(key_for(update))
+    message = update.effective_message
+    if not state or state.get("mode") not in {"new_request", "resubmit"}:
+        await message.reply_text("لا يوجد حقل اختياري يمكن تخطيه حالياً.")
+        return
+
+    step = state.get("step")
+    if step == "details":
+        state["data"]["additional_details"] = ""
+        state["step"] = "attachment"
+        await ask_next_request_field(update, context, state)
+        return
+    if step == "attachment":
+        await finalize_request(update, context, state, state.get("request_id"))
+        return
+    await message.reply_text("يمكن استخدام /skip فقط عند الملاحظات أو المرفقات الاختيارية.")
+
+
 async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not private_chat(update):
         return
@@ -706,6 +728,7 @@ def build_application() -> Application:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CommandHandler("skip", skip_command))
     app.add_handler(CommandHandler("new_request", new_request))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("export", export_command))
