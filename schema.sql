@@ -48,10 +48,24 @@ CREATE TABLE IF NOT EXISTS expense_requests (
     version_no INTEGER NOT NULL DEFAULT 1 CHECK (version_no > 0),
     mosque_name TEXT NOT NULL,
     wilaya TEXT NOT NULL,
+    baladiya TEXT NOT NULL DEFAULT '',
     mission_start_date DATE,
     mission_end_date DATE,
     duration_days INTEGER CHECK (duration_days IS NULL OR duration_days > 0),
     duration_text TEXT NOT NULL,
+    responsable TEXT NOT NULL DEFAULT '',
+    carpet_type TEXT NOT NULL DEFAULT '',
+    carpet_area NUMERIC(14,2) CHECK (carpet_area IS NULL OR carpet_area > 0),
+    has_feutre BOOLEAN NOT NULL DEFAULT FALSE,
+    carpet_rate NUMERIC(14,2) CHECK (carpet_rate IS NULL OR carpet_rate > 0),
+    carpet_amount NUMERIC(14,2) CHECK (carpet_amount IS NULL OR carpet_amount >= 0),
+    approval_stage SMALLINT NOT NULL DEFAULT 0 CHECK (approval_stage BETWEEN 0 AND 3),
+    space_approved_by BIGINT,
+    space_approved_at TIMESTAMPTZ,
+    expenses_approved_by BIGINT,
+    expenses_approved_at TIMESTAMPTZ,
+    total_approved_by BIGINT,
+    total_approved_at TIMESTAMPTZ,
     amount_requested NUMERIC(14,2) NOT NULL CHECK (amount_requested > 0),
     currency TEXT NOT NULL DEFAULT 'DZD',
     additional_details TEXT NOT NULL DEFAULT '',
@@ -145,6 +159,20 @@ CREATE INDEX IF NOT EXISTS idx_expense_requests_user ON expense_requests(user_id
 CREATE INDEX IF NOT EXISTS idx_expense_requests_status ON expense_requests(status);
 CREATE INDEX IF NOT EXISTS idx_expense_requests_created_at ON expense_requests(created_at);
 ALTER TABLE workflow_events ADD COLUMN IF NOT EXISTS target_user_id BIGINT REFERENCES users(telegram_user_id) ON DELETE SET NULL;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS baladiya TEXT NOT NULL DEFAULT '';
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS responsable TEXT NOT NULL DEFAULT '';
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_area NUMERIC(14,2);
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS has_feutre BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_rate NUMERIC(14,2);
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_amount NUMERIC(14,2);
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS approval_stage SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS space_approved_by BIGINT;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS space_approved_at TIMESTAMPTZ;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS expenses_approved_by BIGINT;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS expenses_approved_at TIMESTAMPTZ;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS total_approved_by BIGINT;
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS total_approved_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_workflow_events_request ON workflow_events(request_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_events_user ON workflow_events(target_user_id, created_at);
@@ -155,5 +183,8 @@ INSERT INTO app_settings (key, value) VALUES
     ('default_currency', 'DZD'),
     ('allow_partial_payment', 'false'),
     ('require_attachment', 'false'),
-    ('stale_hours', '72')
+    ('stale_hours', '72'),
+    ('responsables', 'Ammar redouan|ahmed lasaakeur'),
+    ('carpet_rate_without_feutre', '15'),
+    ('carpet_rate_with_feutre', '20')
 ON CONFLICT (key) DO NOTHING;

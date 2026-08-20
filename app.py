@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-import logging
 import os
+import logging
 import re
+import asyncio
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 from db import Database
-from domain import DomainError, ExpenseInput, profile_link
+from domain import DomainError, ExpenseInput, calculate_carpet_amount, mission_expenses_total, parse_amount, parse_positive_number, profile_link
 from excel_export import build_confirmed_workbook
 from formatting import request_summary, status_text, user_summary
 
@@ -103,16 +103,53 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def admin_request_keyboard(request_id: int, status: str) -> InlineKeyboardMarkup:
+def admin_request_keyboard(request_id: int, status: str, approval_stage: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if status in {"submitted", "resubmitted", "reopened", "payment_rejected", "expired"}:
-        rows.append([
-            InlineKeyboardButton("اعتماد وتحويل للصندوق", callback_data=f"a:approve:{request_id}"),
-            InlineKeyboardButton("تعديل مباشر", callback_data=f"a:edit:{request_id}"),
-        ])
+        if approval_stage == 0:
+            rows.append([InlineKeyboardButton("1) اعتماد المساحة", callback_data=f"a:stage1:{request_id}")])
+        elif approval_stage == 1:
+            rows.append([InlineKeyboardButton("2) اعتماد المبلغ والمصاريف", callback_data=f"a:stage2:{request_id}")])
+        elif approval_stage == 2:
+            rows.append([InlineKeyboardButton("3) اعتماد الإجمالي", callback_data=f"a:stage3:{request_id}"), InlineKeyboardButton("رجوع للتعديل", callback_data=f"a:back:{request_id}")])
+        rows.append([InlineKeyboardButton("تعديل حقل", callback_data=f"a:fields:{request_id}")])
         rows.append([InlineKeyboardButton("طلب تعديل من المستخدم", callback_data=f"a:chg:{request_id}")])
         rows.append([InlineKeyboardButton("إلغاء الطلب", callback_data=f"a:cancel:{request_id}")])
     rows.append([InlineKeyboardButton("عرض سجل الطلب", callback_data=f"a:events:{request_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def user_step_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    step = state.get("step")
+    if step == "responsable":
+        names = DB.get_responsables()
+        return InlineKeyboardMarkup([[InlineKeyboardButton(name, callback_data=f"u:responsable:{i}")] for i, name in enumerate(names)])
+    if step == "feutre":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("نعم", callback_data="u:feutre:1"), InlineKeyboardButton("لا", callback_data="u:feutre:0")]])
+    if step == "expense_desc":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("تم إدخال المصاريف", callback_data="u:expenses_done")]])
+    return None
+
+
+def admin_fields_keyboard(row: dict[str, Any]) -> InlineKeyboardMarkup:
+    request_id = int(row["id"])
+    fields = [
+        ("اسم المسجد / المهمة", "mosque_name"), ("الولاية", "wilaya"), ("البلدية", "baladiya"),
+        ("مدة المهمة", "duration_text"), ("المسؤول", "responsable"), ("نوع السجاد", "carpet_type"),
+        ("المساحة", "carpet_area"), ("Feutre", "has_feutre"), ("سعر المتر", "carpet_rate"),
+        ("مبلغ السجاد", "carpet_amount"),
+    ]
+    rows = [[InlineKeyboardButton(label, callback_data=f"a:field:{request_id}:{field}") for label, field in fields[i:i + 2]] for i in range(0, len(fields), 2)]
+    rows.append([InlineKeyboardButton("تعديل مصاريف المهمة", callback_data=f"a:expenses:{request_id}")])
+    rows.append([InlineKeyboardButton("رجوع إلى الطلب", callback_data=f"a:show:{request_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_expenses_keyboard(row: dict[str, Any]) -> InlineKeyboardMarkup:
+    request_id = int(row["id"])
+    items = row.get("mission_expenses") or []
+    rows = [[InlineKeyboardButton(f"تعديل {i + 1}: {str(item.get('description', ''))[:18]}", callback_data=f"a:expense_edit:{request_id}:{int(item['id'])}"), InlineKeyboardButton("حذف", callback_data=f"a:expense_remove:{request_id}:{int(item['id'])}")] for i, item in enumerate(items)]
+    rows.append([InlineKeyboardButton("رجوع إلى الحقول", callback_data=f"a:fields:{request_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -181,7 +218,7 @@ async def notify_admin_group(context: ContextTypes.DEFAULT_TYPE, row: dict[str, 
         None,
         "group",
         "admin_request",
-        admin_request_keyboard(int(row["id"]), str(row["status"])),
+        admin_request_keyboard(int(row["id"]), str(row["status"]), int(row.get("approval_stage") or 0)),
         ADMIN_THREAD_ID,
     )
 
@@ -244,7 +281,7 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     step = state.get("step")
-    if step == "details":
+    if step in {"details", "expense_desc"}:
         state["data"]["additional_details"] = ""
         state["step"] = "attachment"
         await ask_next_request_field(update, context, state)
@@ -269,44 +306,48 @@ async def new_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def ask_next_request_field(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
-    step = state["step"]
     prompts = {
         "mosque": "أرسل اسم المسجد أو المهمة.",
-        "wilaya": "أرسل الولاية.",
-        "duration": "أرسل مدة المهمة، مثال: 3 أيام أو من 01 إلى 03 مارس.",
-        "amount": "أرسل المبلغ المطلوب بالدينار الجزائري، مثال: 12500.00.",
-        "details": "أرسل أي ملاحظات إضافية، أو أرسل /skip إذا لا توجد ملاحظات.",
-        "attachment": "أرسل صورة أو ملفاً يثبت المصروف، أو أرسل /skip إذا لا يوجد مرفق.",
+        "location": "أرسل الولاية والبلدية مفصولتين بفاصلة أو بمسافتين، أو أرسل الولاية فقط وسأطلب البلدية.",
+        "baladiya": "أرسل اسم البلدية.",
+        "duration": "أرسل مدة المهمة.",
+        "responsable": "اختر المسؤول من القائمة.",
+        "carpet_type": "أرسل نوع سجاد المسجد كنص حر.",
+        "carpet_area": "أرسل المساحة المفرشة بالمتر المربع.",
+        "feutre": "هل المساحة المفرشة مع Feutre؟ اختر نعم أو لا.",
+        "expense_desc": "أرسل وصف المصروف التالي، أو اضغط تم إذا انتهيت من إضافة المصاريف.",
+        "expense_amount": "أرسل مبلغ هذا المصروف بالدينار الجزائري.",
+        "attachment": "أرسل صورة أو ملفاً، أو أرسل /skip إذا لا يوجد مرفق.",
     }
-    await update.effective_message.reply_text(prompts[step])
+    await update.effective_message.reply_text(prompts[state["step"]], reply_markup=user_step_keyboard(state))
 
 
 async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], request_id: int | None = None) -> None:
     data = state["data"]
     try:
+        rates = DB.get_carpet_rates()
+        area = Decimal(str(data["carpet_area"]))
+        has_feutre = bool(data["has_feutre"])
+        rate = rates[1] if has_feutre else rates[0]
+        carpet_amount = calculate_carpet_amount(area, has_feutre, rates[0], rates[1])
+        items = tuple({**item, "amount": Decimal(str(item["amount"]))} for item in data.get("mission_expenses", []))
+        total = (carpet_amount + mission_expenses_total(items)).quantize(Decimal("0.01"))
         expense = ExpenseInput(
-            mosque_name=data["mosque_name"],
-            wilaya=data["wilaya"],
-            duration_text=data["duration_text"],
-            amount_requested=Decimal(data["amount_requested"]),
-            currency="DZD",
-            additional_details=data.get("additional_details", ""),
+            mosque_name=data["mosque_name"], wilaya=data["wilaya"], baladiya=data["baladiya"], duration_text=data["duration_text"],
+            responsable=data["responsable"], carpet_type=data["carpet_type"], carpet_area=area, has_feutre=has_feutre,
+            carpet_rate=rate, carpet_amount=carpet_amount, mission_expenses=items, amount_requested=total,
+            currency="DZD", additional_details="",
         )
         user_id = update.effective_user.id  # type: ignore[union-attr]
         attachments = data.get("attachments", [])
-        if request_id:
-            row = DB.user_resubmit(request_id, user_id, expense, attachments)
-        else:
-            row = DB.create_request(user_id, expense, attachments)
+        row = DB.user_resubmit(request_id, user_id, expense, attachments) if request_id else DB.create_request(user_id, expense, attachments)
         full_row = DB.get_request(int(row["id"]))
         assert full_row is not None
         pending.pop(key_for(update), None)
-        await update.effective_message.reply_text(
-            "تم إرسال طلبك إلى الإدارة بنجاح. رقم الطلب: " + str(full_row["public_id"]) + "\nستصلك رسالة عند طلب تعديل أو إلغاء أو تأكيد الدفع."
-        )
+        await update.effective_message.reply_text("تم إرسال طلبك إلى الإدارة بنجاح. رقم الطلب: " + str(full_row["public_id"]))
         await notify_admin_group(context, full_row)
     except (DomainError, KeyError, ValueError) as exc:
-        await update.effective_message.reply_text(f"لم يتم حفظ الطلب: {exc}\nأرسل القيمة الصحيحة أو استخدم /cancel.")
+        await update.effective_message.reply_text(f"لم يتم حفظ الطلب: {exc}\\nأرسل القيمة الصحيحة أو استخدم /cancel.")
 
 
 async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -335,29 +376,50 @@ async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     step = state["step"]
     if step == "mosque":
         state["data"]["mosque_name"] = text
-        state["step"] = "wilaya"
-    elif step == "wilaya":
-        state["data"]["wilaya"] = text
+        state["step"] = "location"
+    elif step == "location":
+        parts = [part.strip() for part in re.split(r",|\\s{2,}", text) if part.strip()]
+        if len(parts) >= 2:
+            state["data"]["wilaya"], state["data"]["baladiya"] = parts[0], parts[1]
+            state["step"] = "duration"
+        else:
+            state["data"]["wilaya"] = text
+            state["step"] = "baladiya"
+    elif step == "baladiya":
+        state["data"]["baladiya"] = text
         state["step"] = "duration"
     elif step == "duration":
         state["data"]["duration_text"] = text
-        state["step"] = "amount"
-    elif step == "amount":
+        state["step"] = "responsable"
+    elif step == "responsable":
+        await message.reply_text("اختر المسؤول من القائمة.", reply_markup=user_step_keyboard(state))
+        return
+    elif step == "carpet_type":
+        state["data"]["carpet_type"] = text
+        state["step"] = "carpet_area"
+    elif step == "carpet_area":
         try:
-            state["data"]["amount_requested"] = str(Decimal(text.replace(",", ".")))
-        except Exception:
-            await message.reply_text("أرسل المبلغ كرقم فقط، مثال: 12500.00")
+            state["data"]["carpet_area"] = str(parse_positive_number(text, "المساحة المفرشة"))
+        except DomainError as exc:
+            await message.reply_text(str(exc))
             return
-        state["step"] = "details"
-    elif step == "details":
-        state["data"]["additional_details"] = "" if text == "/skip" else text
-        state["step"] = "attachment"
+        state["step"] = "feutre"
+    elif step == "feutre":
+        await message.reply_text("اختر نعم أو لا من الأزرار.", reply_markup=user_step_keyboard(state))
+        return
+    elif step == "expense_desc":
+        state["data"]["current_expense_description"] = text
+        state["step"] = "expense_amount"
+    elif step == "expense_amount":
+        try:
+            amount = parse_amount(text)
+        except DomainError as exc:
+            await message.reply_text(str(exc))
+            return
+        state["data"].setdefault("mission_expenses", []).append({"description": state["data"].pop("current_expense_description"), "amount": str(amount), "currency": "DZD"})
+        state["step"] = "expense_desc"
     elif step == "attachment":
-        if text != "/skip":
-            await message.reply_text("أرسل صورة أو ملفاً، أو /skip للمتابعة دون مرفق.")
-            return
-        request_id = state.get("request_id")
-        await finalize_request(update, context, state, request_id)
+        await message.reply_text("أرسل صورة أو ملفاً، أو /skip للمتابعة دون مرفق.")
         return
     await ask_next_request_field(update, context, state)
 
@@ -400,6 +462,28 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_document(document=workbook, filename=f"confirmed_expenses_{date.today().isoformat()}.xlsx", caption=f"تم تصدير {len(rows)} طلباً مؤكداً.")
 
 
+async def responsables_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin_member(update, context):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("المسؤولون الحاليون:\\n" + "\\n".join(f"- {name}" for name in DB.get_responsables()) + "\\n\\nلتغييرهم: /set_responsables الاسم الأول | الاسم الثاني")
+        return
+    names = [item.strip() for item in " ".join(context.args).split("|")]
+    DB.set_responsables(names, update.effective_user.id, actor_name(update))  # type: ignore[union-attr]
+    await update.effective_message.reply_text("تم تحديث قائمة المسؤولين للمطالبات المستقبلية.")
+
+
+async def carpet_rates_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin_member(update, context):
+        return
+    if len(context.args) != 2:
+        without, with_feutre = DB.get_carpet_rates()
+        await update.effective_message.reply_text(f"الأسعار الحالية: بدون Feutre = {without} دج/م²، مع Feutre = {with_feutre} دج/م²\\nلتغييرها: /set_carpet_rates 15 20")
+        return
+    DB.set_carpet_rates(parse_amount(context.args[0]), parse_amount(context.args[1]))
+    await update.effective_message.reply_text("تم تحديث السعرين الافتراضيين للمطالبات المستقبلية.")
+
+
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin_member(update, context):
         return
@@ -409,6 +493,9 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "/export — تصدير الطلبات المؤكدة إلى Excel.\n"
         "/set_cashier user <telegram_id> — ضبط الصندوق كمستخدم خاص.\n"
         "/set_cashier group <chat_id> — ضبط الصندوق كمجموعة.\n"
+        "/responsables — عرض قائمة المسؤولين.\n"
+        "/set_responsables الاسم الأول | الاسم الثاني — تعديل القائمة.\n"
+        "/set_carpet_rates 15 20 — تعديل سعري المتر الافتراضيين.\n"
         "/cancel — إلغاء إدخال سبب جارٍ.\n\n"
         "أعضاء المجموعة متساوون؛ كل إجراء يعتمد على عضوية المجموعة ويُسجّل بمعرف واسم المنفذ.", parse_mode=ParseMode.HTML
     )
@@ -466,6 +553,34 @@ async def user_callback(query, context: ContextTypes.DEFAULT_TYPE, action: str, 
         pending[(chat.id, user.id)] = {"mode": "new_request", "step": "mosque", "data": {}}
         await query.message.reply_text("أرسل اسم المسجد أو اسم المهمة التي صُرفت عليها المصاريف.")
         return
+    if action == "responsable":
+        state = pending.get((chat.id, user.id))
+        if not state or state.get("step") != "responsable":
+            return
+        try:
+            index = int(args[0])
+            names = DB.get_responsables()
+            state["data"]["responsable"] = names[index]
+        except (ValueError, IndexError):
+            raise DomainError("اختيار المسؤول غير صالح.")
+        state["step"] = "carpet_type"
+        await query.message.reply_text("تم اختيار المسؤول. أرسل نوع سجاد المسجد كنص حر.")
+        return
+    if action == "feutre":
+        state = pending.get((chat.id, user.id))
+        if not state or state.get("step") != "feutre" or not args:
+            return
+        state["data"]["has_feutre"] = args[0] == "1"
+        state["step"] = "expense_desc"
+        await query.message.reply_text("تم حفظ حالة Feutre. أرسل وصف أول مصروف، أو اضغط تم إذا لا توجد مصاريف إضافية.", reply_markup=user_step_keyboard(state))
+        return
+    if action == "expenses_done":
+        state = pending.get((chat.id, user.id))
+        if not state or state.get("step") != "expense_desc":
+            return
+        state["step"] = "attachment"
+        await query.message.reply_text("تم حفظ مصاريف المهمة. أرسل مرفقاً أو استخدم /skip.")
+        return
     if action == "list":
         rows = DB.get_user_requests(user.id)
         if not rows:
@@ -515,16 +630,66 @@ async def admin_callback(query, context: ContextTypes.DEFAULT_TYPE, action: str,
     row = DB.get_request(request_id)
     if not row:
         raise DomainError("الطلب غير موجود.")
-    if action == "approve":
-        updated = DB.admin_approve(request_id, query.from_user.id, actor_name_from_user(query.from_user))
+    actor_id = query.from_user.id
+    actor_name = actor_name_from_user(query.from_user)
+    if action in {"stage1", "stage2", "stage3"}:
+        stage = int(action[-1])
+        updated = DB.admin_approve_stage(request_id, stage, actor_id, actor_name)
+        full = DB.get_request(request_id)
+        if not full:
+            return
+        if stage == 3:
+            await notify_cashier(context, full)
+            await query.message.reply_text("تم اعتماد المبلغ الإجمالي وتحويل الطلب إلى الصندوق.", reply_markup=admin_request_keyboard(request_id, str(full["status"]), int(full.get("approval_stage") or 0)))
+        else:
+            await query.message.reply_text(f"تم اعتماد المرحلة {stage}/3.\\n\\n" + request_summary(full, internal=True), parse_mode=ParseMode.HTML, reply_markup=admin_request_keyboard(request_id, str(full["status"]), int(full.get("approval_stage") or 0)))
+        return
+    if action in {"approve", "edit"}:
+        if action == "approve":
+            updated = DB.admin_approve_stage(request_id, 3, actor_id, actor_name)
+            full = DB.get_request(request_id)
+            if full:
+                await notify_cashier(context, full)
+                await query.message.reply_text("تم اعتماد المبلغ الإجمالي وتحويل الطلب إلى الصندوق.")
+            return
+        await query.message.reply_text(request_summary(row, internal=True), parse_mode=ParseMode.HTML, reply_markup=admin_fields_keyboard(row))
+        return
+    if action == "show":
+        await query.message.reply_text(request_summary(row, internal=True), parse_mode=ParseMode.HTML, reply_markup=admin_request_keyboard(request_id, str(row["status"]), int(row.get("approval_stage") or 0)))
+        return
+    if action == "fields":
+        await query.message.reply_text("اختر الحقل الذي تريد تعديله:", reply_markup=admin_fields_keyboard(row))
+        return
+    if action == "expenses":
+        await query.message.reply_text("اختر المصروف الذي تريد تعديله أو حذفه:", reply_markup=admin_expenses_keyboard(row))
+        return
+    if action == "field":
+        if len(args) < 2:
+            return
+        field = args[1]
+        pending[(query.message.chat.id, actor_id)] = {"mode": "admin_field", "request_id": request_id, "field": field}
+        await query.message.reply_text(f"أرسل القيمة الجديدة للحقل: {field}")
+        return
+    if action == "expense_edit":
+        if len(args) < 2:
+            return
+        item_id = int(args[1])
+        pending[(query.message.chat.id, actor_id)] = {"mode": "admin_expense_edit", "request_id": request_id, "item_id": item_id}
+        await query.message.reply_text("أرسل التعديل بهذه الصيغة: الوصف | المبلغ")
+        return
+    if action == "expense_remove":
+        if len(args) < 2:
+            return
+        DB.admin_remove_expense_item(request_id, int(args[1]), actor_id, actor_name)
         full = DB.get_request(request_id)
         if full:
-            await notify_cashier(context, full)
-            await query.message.reply_text("تم اعتماد الطلب وتحويله إلى الصندوق.")
+            await query.message.reply_text("تم حذف المصروف وإعادة حساب الإجمالي.", reply_markup=admin_expenses_keyboard(full))
         return
-    if action == "edit":
-        pending[(query.message.chat.id, query.from_user.id)] = {"mode": "admin_edit", "request_id": request_id}
-        await query.message.reply_text("أرسل التعديل بهذا الترتيب مفصولاً بعلامة |:\nاسم المسجد | الولاية | مدة المهمة | المبلغ | الملاحظات الاختيارية")
+    if action == "back":
+        DB.admin_back_to_edit(request_id, actor_id, actor_name)
+        full = DB.get_request(request_id)
+        if full:
+            await query.message.reply_text("تمت إعادة الطلب إلى وضع التعديل، ويجب إعادة اعتماد المراحل من البداية.", reply_markup=admin_request_keyboard(request_id, str(full["status"]), 0))
         return
     if action == "chg":
         pending[(query.message.chat.id, query.from_user.id)] = {"mode": "admin_reason", "action": "changes", "request_id": request_id}
@@ -589,6 +754,46 @@ async def group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             DB.update_user_name(int(state["target_user_id"]), text, user_id, actor_name(update))
             pending.pop((chat_id, user_id), None)
             await update.effective_message.reply_text("تم تعديل الاسم وتسجيل العملية في سجل التدقيق.")
+            return
+        if state["mode"] == "admin_field":
+            if not await is_admin_member(update, context):
+                return
+            request_id = int(state["request_id"])
+            field = str(state["field"])
+            value: Any = text
+            if field == "has_feutre":
+                normalized = text.lower()
+                if normalized not in {"نعم", "لا", "yes", "no", "1", "0"}:
+                    await update.effective_message.reply_text("أرسل نعم أو لا فقط.")
+                    return
+                value = normalized in {"نعم", "yes", "1"}
+            elif field in {"carpet_area", "carpet_rate", "carpet_amount"}:
+                value = parse_positive_number(text, field)
+            elif field == "responsable" and text not in DB.get_responsables():
+                await update.effective_message.reply_text("اختر اسماً موجوداً في قائمة المسؤولين أو حدّث القائمة أولاً بالأمر /set_responsables.")
+                return
+            DB.admin_edit_field(request_id, field, value, user_id, actor_name(update), f"تعديل الحقل {field}")
+            pending.pop((chat_id, user_id), None)
+            row = DB.get_request(request_id)
+            if row:
+                await notify_user(context, row, "<b>عدّلت الإدارة بيانات طلبك</b>\\n\\n" + request_summary(row))
+                await update.effective_message.reply_text("تم تعديل الحقل وإبلاغ المستخدم.", reply_markup=admin_request_keyboard(request_id, str(row["status"]), int(row.get("approval_stage") or 0)))
+            return
+        if state["mode"] == "admin_expense_edit":
+            if not await is_admin_member(update, context):
+                return
+            parts = [part.strip() for part in text.split("|", 1)]
+            if len(parts) != 2:
+                await update.effective_message.reply_text("الصيغة المطلوبة: وصف المصروف | المبلغ")
+                return
+            amount = parse_amount(parts[1])
+            request_id = int(state["request_id"])
+            DB.admin_update_expense_item(request_id, int(state["item_id"]), parts[0], amount, user_id, actor_name(update))
+            pending.pop((chat_id, user_id), None)
+            row = DB.get_request(request_id)
+            if row:
+                await notify_user(context, row, "<b>عدّلت الإدارة مصاريف طلبك</b>\\n\\n" + request_summary(row))
+                await update.effective_message.reply_text("تم تعديل المصروف وإبلاغ المستخدم.", reply_markup=admin_expenses_keyboard(row))
             return
         if state["mode"] == "admin_edit":
             if not await is_admin_member(update, context):
@@ -734,6 +939,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("help_admin", admin_help))
     app.add_handler(CommandHandler("set_cashier", set_cashier_command))
+    app.add_handler(CommandHandler("responsables", responsables_command))
+    app.add_handler(CommandHandler("set_responsables", responsables_command))
+    app.add_handler(CommandHandler("set_carpet_rates", carpet_rates_command))
     app.add_handler(CallbackQueryHandler(callback_router, pattern=r"^(u|a|c):"))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL), private_media))
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_text))

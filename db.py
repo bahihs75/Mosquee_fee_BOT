@@ -217,9 +217,9 @@ class Database:
             if not cur.fetchone():
                 raise DomainError("يجب تسجيل المستخدم وتفعيله قبل إنشاء الطلب.")
             cur.execute(
-                "INSERT INTO expense_requests(public_id,user_id,status,version_no,mosque_name,wilaya,mission_start_date,mission_end_date,duration_text,amount_requested,currency,additional_details) "
-                "VALUES('PENDING',%s,'submitted',1,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
-                (user_id, validated.mosque_name, validated.wilaya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.amount_requested, validated.currency, validated.additional_details),
+                "INSERT INTO expense_requests(public_id,user_id,status,version_no,mosque_name,wilaya,baladiya,mission_start_date,mission_end_date,duration_text,responsable,carpet_type,carpet_area,has_feutre,carpet_rate,carpet_amount,approval_stage,amount_requested,currency,additional_details) "
+                "VALUES('PENDING',%s,'submitted',1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s) RETURNING *",
+                (user_id, validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details),
             )
             row = dict(cur.fetchone())
             public_id = f"EXP-{datetime.now(timezone.utc).year}-{row['id']:06d}"
@@ -229,6 +229,7 @@ class Database:
                 "INSERT INTO request_versions(request_id,version_no,snapshot,created_by,source) VALUES(%s,1,%s,%s,'user')",
                 (row["id"], Json(snapshot), user_id),
             )
+            self._insert_items(cur, row["id"], 1, validated.mission_expenses)
             for attachment in attachments or []:
                 cur.execute(
                     "INSERT INTO attachments(request_id,version_no,telegram_file_id,telegram_file_unique_id,media_type,original_name) VALUES(%s,1,%s,%s,%s,%s)",
@@ -238,6 +239,170 @@ class Database:
             conn.commit()
             return row
 
+    def get_responsables(self) -> list[str]:
+        raw = self.get_setting("responsables", "Ammar redouan|ahmed lasaakeur") or ""
+        return [item.strip() for item in raw.split("|") if item.strip()]
+
+    def set_responsables(self, names: list[str], actor_id: int, actor_name: str) -> None:
+        cleaned = [" ".join(name.strip().split()) for name in names if name.strip()]
+        if not cleaned:
+            raise DomainError("يجب أن تحتوي قائمة المسؤولين على اسم واحد على الأقل.")
+        if any(len(name) < 2 or len(name) > 200 for name in cleaned):
+            raise DomainError("اسم المسؤول غير صالح.")
+        self.set_setting("responsables", "|".join(dict.fromkeys(cleaned)))
+
+    def get_carpet_rates(self) -> tuple[Decimal, Decimal]:
+        without = Decimal(self.get_setting("carpet_rate_without_feutre", "15") or "15")
+        with_feutre = Decimal(self.get_setting("carpet_rate_with_feutre", "20") or "20")
+        return without, with_feutre
+
+    def set_carpet_rates(self, without_feutre: Decimal, with_feutre: Decimal) -> None:
+        if without_feutre <= 0 or with_feutre <= 0:
+            raise DomainError("سعر المتر يجب أن يكون أكبر من الصفر.")
+        self.set_setting("carpet_rate_without_feutre", str(without_feutre))
+        self.set_setting("carpet_rate_with_feutre", str(with_feutre))
+
+    def get_expense_items(self, request_id: int, version_no: int | None = None) -> list[dict[str, Any]]:
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if version_no is None:
+                cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (request_id,))
+            else:
+                cur.execute("SELECT * FROM expense_items WHERE request_id=%s AND version_no=%s ORDER BY id", (request_id, version_no))
+            return [dict(row) for row in cur.fetchall()]
+
+    def _insert_items(self, cur, request_id: int, version_no: int, items: Iterable[dict[str, Any]]) -> None:
+        for item in items:
+            cur.execute(
+                "INSERT INTO expense_items(request_id,version_no,item_type,description,amount,currency) VALUES(%s,%s,'mission',%s,%s,%s)",
+                (request_id, version_no, item["description"], item["amount"], item.get("currency", "DZD")),
+            )
+
+    def _request_snapshot_with_items(self, row: dict[str, Any], cur) -> dict[str, Any]:
+        snapshot = self._snapshot(row)
+        cur.execute("SELECT description,amount,currency,item_type FROM expense_items WHERE request_id=%s AND version_no=%s ORDER BY id", (row["id"], row["version_no"]))
+        snapshot["mission_expenses"] = [self._snapshot(dict(item)) for item in cur.fetchall()]
+        return snapshot
+
+    def _recalculate_total(self, cur, row: dict[str, Any]) -> Decimal:
+        cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM expense_items WHERE request_id=%s AND version_no=%s", (row["id"], row["version_no"]))
+        items_total = Decimal(cur.fetchone()["total"] or 0)
+        carpet_amount = Decimal(row.get("carpet_amount") or 0)
+        total = (carpet_amount + items_total).quantize(Decimal("0.01"))
+        cur.execute("UPDATE expense_requests SET amount_requested=%s,updated_at=NOW() WHERE id=%s RETURNING *", (total, row["id"]))
+        return total
+
+    def admin_approve_stage(self, request_id: int, stage: int, actor_id: int, actor_name: str) -> dict[str, Any]:
+        if stage not in {1, 2, 3}:
+            raise DomainError("مرحلة الاعتماد غير صالحة.")
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            row = self._locked_request(cur, request_id)
+            if row["status"] not in {Status.SUBMITTED.value, Status.RESUBMITTED.value, Status.REOPENED.value}:
+                raise DomainError("لا يمكن اعتماد هذا الطلب في حالته الحالية.")
+            expected = int(row.get("approval_stage") or 0) + 1
+            if stage != expected:
+                raise DomainError(f"يجب اعتماد المرحلة السابقة أولاً. المرحلة المطلوبة الآن: {expected}.")
+            fields = {1: ("space_approved_by", "space_approved_at", "space_approved"), 2: ("expenses_approved_by", "expenses_approved_at", "expenses_approved"), 3: ("total_approved_by", "total_approved_at", "admin_approved")}[stage]
+            status = Status.APPROVED_BY_ADMIN.value if stage == 3 else row["status"]
+            cur.execute(
+                f"UPDATE expense_requests SET approval_stage=%s,{fields[0]}=%s,{fields[1]}=NOW(),status=%s,approved_by=CASE WHEN %s=3 THEN %s ELSE approved_by END,approved_at=CASE WHEN %s=3 THEN NOW() ELSE approved_at END,approved_version_no=CASE WHEN %s=3 THEN version_no ELSE approved_version_no END,updated_at=NOW() WHERE id=%s AND approval_stage=%s AND version_no=%s RETURNING *",
+                (stage, actor_id, status, stage, actor_id, stage, stage, row["id"], stage - 1, row["version_no"]),
+            )
+            updated = cur.fetchone()
+            if not updated:
+                raise DomainError("تغير الطلب قبل اعتماد المرحلة. أعد تحميله.")
+            updated = dict(updated)
+            self._event(cur, row["id"], fields[2], row["status"], status, actor_id, actor_name, row["version_no"], f"اعتماد المرحلة {stage}", {"stage": stage})
+            conn.commit()
+            return updated
+
+    def admin_edit_field(self, request_id: int, field: str, value: Any, actor_id: int, actor_name: str, reason: str = "") -> dict[str, Any]:
+        allowed = {"mosque_name", "wilaya", "baladiya", "duration_text", "responsable", "carpet_type", "carpet_area", "has_feutre", "carpet_rate", "carpet_amount"}
+        if field not in allowed:
+            raise DomainError("هذا الحقل لا يدعم التعديل المباشر.")
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            row = self._locked_request(cur, request_id)
+            if row["status"] not in {Status.SUBMITTED.value, Status.RESUBMITTED.value, Status.REOPENED.value} or int(row.get("approval_stage") or 0) >= 3:
+                raise DomainError("لا يمكن تعديل الطلب بعد الاعتماد النهائي.")
+            value = str(value).strip() if field not in {"carpet_area", "carpet_rate", "carpet_amount", "has_feutre"} else value
+            if field in {"mosque_name", "wilaya", "baladiya", "duration_text", "responsable", "carpet_type"}:
+                if len(str(value).strip()) < 1:
+                    raise DomainError("القيمة الجديدة لا يمكن أن تكون فارغة.")
+            if field in {"carpet_area", "carpet_rate", "carpet_amount"}:
+                value = Decimal(str(value).replace(",", ".")).quantize(Decimal("0.01"))
+                if value <= 0:
+                    raise DomainError("القيمة يجب أن تكون أكبر من الصفر.")
+            if field == "has_feutre":
+                value = bool(value)
+            updates = {field: value}
+            if field == "carpet_area":
+                updates["carpet_amount"] = (value * Decimal(row.get("carpet_rate") or (20 if row.get("has_feutre") else 15))).quantize(Decimal("0.01"))
+            elif field == "has_feutre" and row.get("carpet_area"):
+                updates["carpet_rate"] = Decimal("20" if value else "15")
+                updates["carpet_amount"] = (Decimal(row["carpet_area"]) * updates["carpet_rate"]).quantize(Decimal("0.01"))
+            elif field == "carpet_rate" and row.get("carpet_area"):
+                updates["carpet_amount"] = (Decimal(row["carpet_area"]) * value).quantize(Decimal("0.01"))
+            assignments = ",".join(f"{key}=%s" for key in updates)
+            params = list(updates.values())
+            params.extend([row["id"]])
+            assignments += ",approval_stage=0,space_approved_by=NULL,space_approved_at=NULL,expenses_approved_by=NULL,expenses_approved_at=NULL,total_approved_by=NULL,total_approved_at=NULL,approved_by=NULL,approved_at=NULL,approved_version_no=NULL"
+            cur.execute(f"UPDATE expense_requests SET {assignments},updated_at=NOW() WHERE id=%s RETURNING *", params)
+            updated = dict(cur.fetchone())
+            self._recalculate_total(cur, updated)
+            cur.execute("SELECT * FROM expense_requests WHERE id=%s", (request_id,))
+            updated = dict(cur.fetchone())
+            next_version = int(row["version_no"]) + 1
+            cur.execute("UPDATE expense_requests SET version_no=%s WHERE id=%s RETURNING *", (next_version, request_id))
+            updated = dict(cur.fetchone())
+            cur.execute("INSERT INTO expense_items(request_id,version_no,item_type,description,amount,currency) SELECT request_id,%s,item_type,description,amount,currency FROM expense_items WHERE request_id=%s AND version_no=%s", (next_version, request_id, row["version_no"]))
+            snapshot = self._request_snapshot_with_items(updated, cur)
+            cur.execute("INSERT INTO request_versions(request_id,version_no,snapshot,created_by,source,change_reason) VALUES(%s,%s,%s,%s,'admin',%s)", (request_id, next_version, Json(snapshot), actor_id, reason or f"تعديل الحقل {field}"))
+            self._event(cur, request_id, "admin_field_edited", row["status"], row["status"], actor_id, actor_name, next_version, reason or f"تعديل {field}", {"field": field})
+            conn.commit()
+            return updated
+
+    def admin_update_expense_item(self, request_id: int, item_id: int, description: str, amount: Decimal, actor_id: int, actor_name: str) -> dict[str, Any]:
+        description = " ".join(description.strip().split())
+        amount = Decimal(amount).quantize(Decimal("0.01"))
+        if len(description) < 2 or amount <= 0:
+            raise DomainError("بيانات المصروف التفصيلي غير صالحة.")
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            row = self._locked_request(cur, request_id)
+            if int(row.get("approval_stage") or 0) >= 2:
+                raise DomainError("لا يمكن تعديل المصاريف بعد اعتماد المرحلة الثانية.")
+            cur.execute("UPDATE expense_items SET description=%s,amount=%s WHERE id=%s AND request_id=%s AND version_no=%s RETURNING *", (description, amount, item_id, request_id, row["version_no"]))
+            item = cur.fetchone()
+            if not item:
+                raise DomainError("المصروف غير موجود أو تغيرت نسخة الطلب.")
+            self._recalculate_total(cur, row)
+            cur.execute("UPDATE expense_requests SET approval_stage=0,space_approved_by=NULL,space_approved_at=NULL,expenses_approved_by=NULL,expenses_approved_at=NULL,total_approved_by=NULL,total_approved_at=NULL,approved_by=NULL,approved_at=NULL,approved_version_no=NULL,updated_at=NOW() WHERE id=%s", (request_id,))
+            self._event(cur, request_id, "mission_expense_edited", row["status"], row["status"], actor_id, actor_name, row["version_no"], "تعديل مصروف تفصيلي", {"item_id": item_id})
+            conn.commit()
+            return dict(item)
+
+    def admin_remove_expense_item(self, request_id: int, item_id: int, actor_id: int, actor_name: str) -> None:
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            row = self._locked_request(cur, request_id)
+            if int(row.get("approval_stage") or 0) >= 2:
+                raise DomainError("لا يمكن حذف المصاريف بعد اعتماد المرحلة الثانية.")
+            cur.execute("DELETE FROM expense_items WHERE id=%s AND request_id=%s AND version_no=%s RETURNING id", (item_id, request_id, row["version_no"]))
+            if not cur.fetchone():
+                raise DomainError("المصروف غير موجود أو تغيرت نسخة الطلب.")
+            self._recalculate_total(cur, row)
+            cur.execute("UPDATE expense_requests SET approval_stage=0,space_approved_by=NULL,space_approved_at=NULL,expenses_approved_by=NULL,expenses_approved_at=NULL,total_approved_by=NULL,total_approved_at=NULL,approved_by=NULL,approved_at=NULL,approved_version_no=NULL,updated_at=NOW() WHERE id=%s", (request_id,))
+            self._event(cur, request_id, "mission_expense_removed", row["status"], row["status"], actor_id, actor_name, row["version_no"], "حذف مصروف تفصيلي", {"item_id": item_id})
+            conn.commit()
+
+    def admin_back_to_edit(self, request_id: int, actor_id: int, actor_name: str) -> dict[str, Any]:
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            row = self._locked_request(cur, request_id)
+            if row["status"] not in {Status.SUBMITTED.value, Status.RESUBMITTED.value, Status.REOPENED.value}:
+                raise DomainError("لا يمكن إعادة هذا الطلب للتعديل في حالته الحالية.")
+            cur.execute("UPDATE expense_requests SET approval_stage=0,space_approved_by=NULL,space_approved_at=NULL,expenses_approved_by=NULL,expenses_approved_at=NULL,total_approved_by=NULL,total_approved_at=NULL,approved_by=NULL,approved_at=NULL,approved_version_no=NULL,updated_at=NOW() WHERE id=%s RETURNING *", (request_id,))
+            updated = dict(cur.fetchone())
+            self._event(cur, request_id, "admin_back_to_edit", row["status"], row["status"], actor_id, actor_name, row["version_no"], "إعادة الطلب للتعديل")
+            conn.commit()
+            return updated
+
     def get_request(self, request_id: int) -> dict[str, Any] | None:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -245,7 +410,12 @@ class Database:
                 (request_id,),
             )
             row = cur.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (request_id,))
+            result["mission_expenses"] = [dict(item) for item in cur.fetchall()]
+            return result
 
     def get_request_by_public_id(self, public_id: str) -> dict[str, Any] | None:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -254,7 +424,12 @@ class Database:
                 (public_id,),
             )
             row = cur.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (result["id"],))
+            result["mission_expenses"] = [dict(item) for item in cur.fetchall()]
+            return result
 
     def get_attachments(self, request_id: int, version_no: int | None = None) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:

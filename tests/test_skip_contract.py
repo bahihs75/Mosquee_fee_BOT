@@ -11,7 +11,7 @@ def test_skip_command_is_registered():
 
 
 def test_skip_only_advances_optional_steps():
-    assert 'if step == "details":' in SOURCE
+    assert 'if step in {"details", "expense_desc"}:' in SOURCE
     assert 'if step == "attachment":' in SOURCE
     assert 'state["data"]["additional_details"] = ""' in SOURCE
     assert 'finalize_request(update, context, state, state.get("request_id"))' in SOURCE
