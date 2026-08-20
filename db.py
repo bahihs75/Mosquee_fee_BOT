@@ -265,8 +265,10 @@ class Database:
     def get_expense_items(self, request_id: int, version_no: int | None = None) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             if version_no is None:
-                cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (request_id,))
-            else:
+                cur.execute("SELECT version_no FROM expense_requests WHERE id=%s", (request_id,))
+                request_row = cur.fetchone()
+                version_no = int(request_row["version_no"]) if request_row else 1
+            if version_no is not None:
                 cur.execute("SELECT * FROM expense_items WHERE request_id=%s AND version_no=%s ORDER BY id", (request_id, version_no))
             return [dict(row) for row in cur.fetchall()]
 
@@ -413,7 +415,7 @@ class Database:
             if not row:
                 return None
             result = dict(row)
-            cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (request_id,))
+            cur.execute("SELECT * FROM expense_items WHERE request_id=%s AND version_no=%s ORDER BY id", (request_id, int(result.get("version_no") or 1)))
             result["mission_expenses"] = [dict(item) for item in cur.fetchall()]
             return result
 
@@ -427,7 +429,7 @@ class Database:
             if not row:
                 return None
             result = dict(row)
-            cur.execute("SELECT * FROM expense_items WHERE request_id=%s ORDER BY id", (result["id"],))
+            cur.execute("SELECT * FROM expense_items WHERE request_id=%s AND version_no=%s ORDER BY id", (result["id"], int(result.get("version_no") or 1)))
             result["mission_expenses"] = [dict(item) for item in cur.fetchall()]
             return result
 

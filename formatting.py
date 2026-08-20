@@ -10,7 +10,7 @@ STATUS_LABELS = {
     Status.SUBMITTED.value: "بانتظار مراجعة الإدارة",
     Status.CHANGES_REQUESTED.value: "مطلوب تعديل من المستخدم",
     Status.RESUBMITTED.value: "أُعيد للإدارة بعد التعديل",
-    Status.APPROVED_BY_ADMIN.value: "اعتمدتها الإدارة – بانتظار اعتماد الجيرون/الأجوان والصندوق",
+    Status.APPROVED_BY_ADMIN.value: "اعتمدتها الإدارة – بانتظار تأكيد الصندوق",
     Status.CASHIER_REVIEW.value: "قيد مراجعة الصندوق",
     Status.PAID_CONFIRMED.value: "تم تأكيد الدفع",
     Status.PAYMENT_REJECTED.value: "علّقها الصندوق / رفض الدفع",
