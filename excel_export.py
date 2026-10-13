@@ -68,7 +68,7 @@ def _build_workbook(rows: list[dict[str, Any]], sheet_title: str, include_status
             _date(row.get("mission_end_date")),
             row.get("duration_text", ""),
             float(row.get("amount_requested", 0)),
-            float(row.get("paid_amount", 0)),
+            float(row.get("paid_amount") or 0),
             row.get("currency", "DZD"),
             row.get("payment_method", ""),
             row.get("additional_details", ""),

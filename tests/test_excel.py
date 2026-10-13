@@ -40,6 +40,8 @@ def test_history_workbook_includes_status_and_request_id():
             "public_id": "EXP-2026-000002",
             "full_name": "مستخدم تجريبي",
             "user_id": 123,
+            "amount_requested": Decimal("100.00"),
+            "paid_amount": None,
         }
     ])
     wb = load_workbook(stream)
@@ -47,3 +49,4 @@ def test_history_workbook_includes_status_and_request_id():
     assert ws["A1"].value == "حالة الطلب"
     assert ws["A2"].value == "بانتظار مراجعة الإدارة"
     assert ws["B2"].value == "EXP-2026-000002"
+    assert ws["L2"].value == 0
