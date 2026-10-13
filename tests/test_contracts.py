@@ -50,5 +50,8 @@ def test_partial_payment_can_only_finish_after_cashier_confirmation():
 def test_history_export_is_admin_only_registered_and_omits_cancelled_requests():
     assert 'CommandHandler("history", history_command)' in APP_SOURCE
     assert "async def history_command" in APP_SOURCE
-    assert "if not await is_admin_member(update, context):" in APP_SOURCE[APP_SOURCE.index("async def history_command"):]
+    history_handler = APP_SOURCE[APP_SOURCE.index("async def history_command"):]
+    assert "if not await is_admin_member(update, context):" in history_handler
+    assert "هذا الأمر متاح فقط لأعضاء مجموعة الإدارة المضبوطة" in history_handler
+    assert 'logger.exception("فشل تصدير سجل الطلبات")' in history_handler
     assert "WHERE r.status NOT IN ('cancelled_by_admin','cancelled_by_user')" in DB_SOURCE

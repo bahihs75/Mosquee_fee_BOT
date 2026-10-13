@@ -464,10 +464,15 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin_member(update, context):
+        await update.effective_message.reply_text("هذا الأمر متاح فقط لأعضاء مجموعة الإدارة المضبوطة.")
         return
-    rows = DB.history_requests()
-    workbook = build_history_workbook(rows)
-    await update.effective_message.reply_document(document=workbook, filename=f"request_history_{date.today().isoformat()}.xlsx", caption=f"تم تصدير {len(rows)} طلباً من سجل الطلبات، باستثناء الطلبات الملغاة.")
+    try:
+        rows = DB.history_requests()
+        workbook = build_history_workbook(rows)
+        await update.effective_message.reply_document(document=workbook, filename=f"request_history_{date.today().isoformat()}.xlsx", caption=f"تم تصدير {len(rows)} طلباً من سجل الطلبات، باستثناء الطلبات الملغاة.")
+    except Exception:
+        logger.exception("فشل تصدير سجل الطلبات")
+        await update.effective_message.reply_text("تعذر تصدير سجل الطلبات حالياً. سجّلت الخطأ ليراجعه مسؤول النظام.")
 
 
 async def responsables_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
