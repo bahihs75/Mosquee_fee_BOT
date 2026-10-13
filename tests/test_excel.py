@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from openpyxl import load_workbook
 
-from excel_export import build_confirmed_workbook
+from excel_export import build_confirmed_workbook, build_history_workbook
 
 
 def test_confirmed_workbook_contains_financial_columns():
@@ -31,3 +31,19 @@ def test_confirmed_workbook_contains_financial_columns():
     assert "رابط ملف تيليغرام" in headers
     assert "المبلغ المدفوع" in headers
     assert wb["الطلبات المؤكدة"]["A2"].value == "EXP-2026-000001"
+
+
+def test_history_workbook_includes_status_and_request_id():
+    stream = build_history_workbook([
+        {
+            "status": "submitted",
+            "public_id": "EXP-2026-000002",
+            "full_name": "مستخدم تجريبي",
+            "user_id": 123,
+        }
+    ])
+    wb = load_workbook(stream)
+    ws = wb["سجل الطلبات"]
+    assert ws["A1"].value == "حالة الطلب"
+    assert ws["A2"].value == "بانتظار مراجعة الإدارة"
+    assert ws["B2"].value == "EXP-2026-000002"

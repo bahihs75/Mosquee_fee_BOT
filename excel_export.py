@@ -8,6 +8,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from formatting import status_text
+
 
 HEADERS = [
     "رقم الطلب",
@@ -39,13 +41,14 @@ def _date(value: Any) -> str:
     return str(value)
 
 
-def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
+def _build_workbook(rows: list[dict[str, Any]], sheet_title: str, include_status: bool) -> BytesIO:
     wb = Workbook()
     ws = wb.active
-    ws.title = "الطلبات المؤكدة"
+    ws.title = sheet_title
     ws.sheet_view.rightToLeft = True
     ws.freeze_panes = "A2"
-    ws.append(HEADERS)
+    headers = (["حالة الطلب"] if include_status else []) + HEADERS
+    ws.append(headers)
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     for cell in ws[1]:
@@ -54,7 +57,7 @@ def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for row in rows:
-        ws.append([
+        values = [
             row.get("public_id", ""),
             row.get("full_name", ""),
             row.get("profile_link", ""),
@@ -73,7 +76,10 @@ def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
             row.get("cashier_user_id", ""),
             _date(row.get("paid_at")),
             row.get("approved_version_no", row.get("version_no", 1)),
-        ])
+        ]
+        if include_status:
+            values.insert(0, status_text(str(row.get("status", ""))))
+        ws.append(values)
 
     for cell in ws[1]:
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -99,6 +105,8 @@ def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
         ("المبلغ المدفوع", "المبلغ الذي أكد الصندوق دفعه فعلياً."),
         ("الإصدار المعتمد", "نسخة الطلب التي اعتمدتها الإدارة قبل تحويله للصندوق."),
     ]
+    if include_status:
+        definitions.insert(0, ("حالة الطلب", "الحالة الحالية للطلب في سجل النظام."))
     for item in definitions:
         meta.append(item)
     meta.column_dimensions["A"].width = 28
@@ -111,3 +119,11 @@ def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
     wb.save(output)
     output.seek(0)
     return output
+
+
+def build_confirmed_workbook(rows: list[dict[str, Any]]) -> BytesIO:
+    return _build_workbook(rows, "الطلبات المؤكدة", include_status=False)
+
+
+def build_history_workbook(rows: list[dict[str, Any]]) -> BytesIO:
+    return _build_workbook(rows, "سجل الطلبات", include_status=True)

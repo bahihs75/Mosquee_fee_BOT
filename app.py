@@ -24,7 +24,7 @@ from telegram.ext import (
 
 from db import Database
 from domain import DomainError, ExpenseInput, calculate_carpet_amount, mission_expenses_total, parse_amount, parse_positive_number, profile_link
-from excel_export import build_confirmed_workbook
+from excel_export import build_confirmed_workbook, build_history_workbook
 from formatting import request_summary, status_text, user_summary
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -462,6 +462,14 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_document(document=workbook, filename=f"confirmed_expenses_{date.today().isoformat()}.xlsx", caption=f"تم تصدير {len(rows)} طلباً مؤكداً.")
 
 
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await is_admin_member(update, context):
+        return
+    rows = DB.history_requests()
+    workbook = build_history_workbook(rows)
+    await update.effective_message.reply_document(document=workbook, filename=f"request_history_{date.today().isoformat()}.xlsx", caption=f"تم تصدير {len(rows)} طلباً من سجل الطلبات، باستثناء الطلبات الملغاة.")
+
+
 async def responsables_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await is_admin_member(update, context):
         return
@@ -491,6 +499,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "<b>واجهة الإدارة</b>\n\n"
         "/users — عرض المستخدمين المسجلين وروابطهم وتغيير أسمائهم.\n"
         "/export — تصدير الطلبات المؤكدة إلى Excel.\n"
+        "/history — تصدير سجل الطلبات إلى Excel باستثناء الطلبات الملغاة.\n"
         "/set_cashier user <telegram_id> — ضبط الصندوق كمستخدم خاص.\n"
         "/set_cashier group <chat_id> — ضبط الصندوق كمجموعة.\n"
         "/responsables — عرض قائمة المسؤولين.\n"
@@ -937,6 +946,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("new_request", new_request))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("help_admin", admin_help))
     app.add_handler(CommandHandler("set_cashier", set_cashier_command))
     app.add_handler(CommandHandler("responsables", responsables_command))

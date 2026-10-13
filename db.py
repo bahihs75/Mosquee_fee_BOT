@@ -663,6 +663,17 @@ class Database:
             cur.execute(query, params)
             return [dict(row) for row in cur.fetchall()]
 
+    def history_requests(self) -> list[dict[str, Any]]:
+        query = (
+            "SELECT r.*,u.full_name,u.username,u.profile_link "
+            "FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id "
+            "WHERE r.status NOT IN ('cancelled_by_admin','cancelled_by_user') "
+            "ORDER BY r.id"
+        )
+        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query)
+            return [dict(row) for row in cur.fetchall()]
+
     def pending_deliveries(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM delivery_messages WHERE status IN ('pending','failed') ORDER BY created_at LIMIT %s", (limit,))

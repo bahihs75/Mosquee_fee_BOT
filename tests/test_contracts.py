@@ -6,6 +6,8 @@ from domain import DomainError, Status, transition
 
 
 SCHEMA = Path(__file__).parents[1].joinpath("schema.sql").read_text(encoding="utf-8")
+APP_SOURCE = Path(__file__).parents[1].joinpath("app.py").read_text(encoding="utf-8")
+DB_SOURCE = Path(__file__).parents[1].joinpath("db.py").read_text(encoding="utf-8")
 
 
 def test_schema_preserves_registered_users_and_profile_links():
@@ -43,3 +45,10 @@ def test_partial_payment_can_only_finish_after_cashier_confirmation():
     with pytest.raises(DomainError):
         transition(Status.PARTIALLY_PAID, "approve_admin")
     assert transition(Status.PARTIALLY_PAID, "confirm_payment").to_status == Status.PAID_CONFIRMED
+
+
+def test_history_export_is_admin_only_registered_and_omits_cancelled_requests():
+    assert 'CommandHandler("history", history_command)' in APP_SOURCE
+    assert "async def history_command" in APP_SOURCE
+    assert "if not await is_admin_member(update, context):" in APP_SOURCE[APP_SOURCE.index("async def history_command"):]
+    assert "WHERE r.status NOT IN ('cancelled_by_admin','cancelled_by_user')" in DB_SOURCE
