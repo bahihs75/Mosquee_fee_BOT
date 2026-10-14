@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Any, Iterable
 from urllib.parse import quote
 
+DAILY_MISSION_RATE = Decimal("700")
+
 
 class Status(StrEnum):
     DRAFT = "draft"
@@ -31,6 +33,8 @@ class ExpenseInput:
     duration_text: str
     amount_requested: Decimal
     currency: str
+    duration_days: Decimal | None = None
+    day_fee_rate: Decimal = DAILY_MISSION_RATE
     additional_details: str = ""
     mission_start_date: date | None = None
     mission_end_date: date | None = None
@@ -92,6 +96,32 @@ def parse_positive_number(raw: str | Decimal | int | float, field_name: str) -> 
     return value
 
 
+def parse_day_equivalents(raw: str | Decimal | int | float) -> Decimal:
+    try:
+        days = Decimal(str(raw).strip().replace(",", "."))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise DomainError("أدخل عدد الأيام كرقم، مثل 1 أو 1.5 أو 0.5.") from exc
+    if not days.is_finite():
+        raise DomainError("أدخل عدد الأيام كرقم صالح.")
+    if days <= 0:
+        raise DomainError("مدة المهمة يجب أن تكون أكبر من صفر.")
+    if days > Decimal("99999.99"):
+        raise DomainError("مدة المهمة أكبر من الحد المسموح به.")
+    if days * 2 != (days * 2).to_integral_value():
+        raise DomainError("تُحتسب المدة بمضاعفات نصف يوم فقط، مثل 0.5 أو 1 أو 1.5.")
+    return days.quantize(Decimal("0.01"))
+
+
+def format_duration_days(days: Decimal) -> str:
+    return f"{Decimal(days).normalize():f} يوم"
+
+
+def calculate_day_fee(days: Decimal | None, rate: Decimal = DAILY_MISSION_RATE) -> Decimal:
+    if days is None:
+        return Decimal("0.00")
+    return (Decimal(days) * Decimal(rate)).quantize(Decimal("0.01"))
+
+
 def calculate_carpet_amount(area: Decimal, has_feutre: bool, rate_without: Decimal = Decimal("15"), rate_with: Decimal = Decimal("20")) -> Decimal:
     rate = rate_with if has_feutre else rate_without
     return (Decimal(area) * Decimal(rate)).quantize(Decimal("0.01"))
@@ -113,7 +143,9 @@ def mission_expenses_total(items: Iterable[dict[str, Any]]) -> Decimal:
 def validate_expense(data: ExpenseInput) -> ExpenseInput:
     mosque_name = normalize_text(data.mosque_name, "اسم المسجد أو المهمة", 2, 200)
     wilaya = normalize_text(data.wilaya, "الولاية", 2, 100)
-    duration_text = normalize_text(data.duration_text, "مدة المهمة", 1, 100)
+    duration_days = parse_day_equivalents(data.duration_days) if data.duration_days is not None else None
+    duration_text = format_duration_days(duration_days) if duration_days is not None else normalize_text(data.duration_text, "مدة المهمة", 1, 100)
+    day_fee_rate = parse_positive_number(data.day_fee_rate, "رسم اليوم")
     currency = normalize_text(data.currency.upper(), "العملة", 3, 7).upper()
     details = (data.additional_details or "").strip()
     if len(details) > 4000:
@@ -136,9 +168,9 @@ def validate_expense(data: ExpenseInput) -> ExpenseInput:
             raise DomainError("نوع السجاد مطلوب.")
         carpet_rate = parse_positive_number(data.carpet_rate or (Decimal("20") if data.has_feutre else Decimal("15")), "سعر المتر")
         carpet_amount = parse_positive_number(data.carpet_amount or carpet_area * carpet_rate, "مبلغ السجاد")
-        expected_total = (carpet_amount + mission_expenses_total(items)).quantize(Decimal("0.01"))
+        expected_total = (carpet_amount + mission_expenses_total(items) + calculate_day_fee(duration_days, day_fee_rate)).quantize(Decimal("0.01"))
         if amount != expected_total:
-            raise DomainError("المبلغ الإجمالي يجب أن يساوي مبلغ السجاد مضافاً إليه مجموع مصاريف المهمة.")
+            raise DomainError("المبلغ الإجمالي يجب أن يساوي رسوم الأيام مضافاً إليها مبلغ السجاد ومصاريف المهمة.")
 
     return ExpenseInput(
         mosque_name=mosque_name,
@@ -146,6 +178,8 @@ def validate_expense(data: ExpenseInput) -> ExpenseInput:
         duration_text=duration_text,
         amount_requested=amount,
         currency=currency,
+        duration_days=duration_days,
+        day_fee_rate=day_fee_rate,
         additional_details=details,
         mission_start_date=data.mission_start_date,
         mission_end_date=data.mission_end_date,
@@ -236,6 +270,9 @@ def snapshot_from_input(data: ExpenseInput) -> dict[str, Any]:
         "mission_start_date": validated.mission_start_date.isoformat() if validated.mission_start_date else None,
         "mission_end_date": validated.mission_end_date.isoformat() if validated.mission_end_date else None,
         "duration_text": validated.duration_text,
+        "duration_days": str(validated.duration_days) if validated.duration_days is not None else None,
+        "day_fee_rate": str(validated.day_fee_rate),
+        "day_fee_amount": str(calculate_day_fee(validated.duration_days, validated.day_fee_rate)),
         "responsable": validated.responsable,
         "carpet_type": validated.carpet_type,
         "carpet_area": str(validated.carpet_area) if validated.carpet_area is not None else None,

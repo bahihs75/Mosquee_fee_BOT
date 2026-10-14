@@ -3,7 +3,7 @@ from decimal import Decimal
 from html import escape
 from typing import Any
 
-from domain import Status, display_profile_html
+from domain import Status, calculate_day_fee, display_profile_html
 
 STATUS_LABELS = {
     Status.DRAFT.value: "مسودة",
@@ -56,6 +56,10 @@ def request_summary(row: dict[str, Any], include_actions: bool = False, internal
         f"<b>الحالة:</b> {escape(status_text(str(row.get('status', ''))))}\n"
         f"<b>النسخة:</b> {row.get('version_no', 1)}\n"
     )
+    if row.get("duration_days") is not None and row.get("day_fee_rate") is not None:
+        days = Decimal(str(row["duration_days"]))
+        rate = Decimal(str(row["day_fee_rate"]))
+        text += f"<b>حساب رسوم الأيام:</b> {days.normalize():f} × {money(rate, row.get('currency', 'DZD'))} = {money(calculate_day_fee(days, rate), row.get('currency', 'DZD'))}\n"
     if internal:
         text += f"<b>سعر المتر:</b> {money(row.get('carpet_rate', 0), row.get('currency', 'DZD'))}\n"
         text += f"<b>مبلغ السجاد:</b> {money(row.get('carpet_amount', 0), row.get('currency', 'DZD'))}\n"

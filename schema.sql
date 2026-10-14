@@ -46,13 +46,15 @@ CREATE TABLE IF NOT EXISTS expense_requests (
         'cancelled_by_user', 'expired', 'reopened'
     )),
     version_no INTEGER NOT NULL DEFAULT 1 CHECK (version_no > 0),
+    requester_name TEXT NOT NULL DEFAULT '',
     mosque_name TEXT NOT NULL,
     wilaya TEXT NOT NULL,
     baladiya TEXT NOT NULL DEFAULT '',
     mission_start_date DATE,
     mission_end_date DATE,
-    duration_days INTEGER CHECK (duration_days IS NULL OR duration_days > 0),
+    duration_days NUMERIC(7,2) CHECK (duration_days IS NULL OR duration_days > 0),
     duration_text TEXT NOT NULL,
+    day_fee_rate NUMERIC(14,2),
     responsable TEXT NOT NULL DEFAULT '',
     carpet_type TEXT NOT NULL DEFAULT '',
     carpet_area NUMERIC(14,2) CHECK (carpet_area IS NULL OR carpet_area > 0),
@@ -166,6 +168,9 @@ ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_area NUMERIC(14,2);
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS has_feutre BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_rate NUMERIC(14,2);
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS carpet_amount NUMERIC(14,2);
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS requester_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE expense_requests ALTER COLUMN duration_days TYPE NUMERIC(7,2) USING duration_days::NUMERIC(7,2);
+ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS day_fee_rate NUMERIC(14,2);
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS approval_stage SMALLINT NOT NULL DEFAULT 0;
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS space_approved_by BIGINT;
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS space_approved_at TIMESTAMPTZ;
@@ -173,6 +178,37 @@ ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS expenses_approved_by BIGIN
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS expenses_approved_at TIMESTAMPTZ;
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS total_approved_by BIGINT;
 ALTER TABLE expense_requests ADD COLUMN IF NOT EXISTS total_approved_at TIMESTAMPTZ;
+
+UPDATE expense_requests r
+SET requester_name=u.full_name
+FROM users u
+WHERE u.telegram_user_id=r.user_id AND r.requester_name='';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='expense_requests_duration_days_half_day_check'
+          AND conrelid='expense_requests'::regclass
+    ) THEN
+        ALTER TABLE expense_requests
+        ADD CONSTRAINT expense_requests_duration_days_half_day_check
+        CHECK (duration_days IS NULL OR (duration_days > 0 AND duration_days * 2 = TRUNC(duration_days * 2)));
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname='expense_requests_day_fee_rate_positive_check'
+          AND conrelid='expense_requests'::regclass
+    ) THEN
+        ALTER TABLE expense_requests
+        ADD CONSTRAINT expense_requests_day_fee_rate_positive_check
+        CHECK (day_fee_rate IS NULL OR day_fee_rate > 0);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_workflow_events_request ON workflow_events(request_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_events_user ON workflow_events(target_user_id, created_at);

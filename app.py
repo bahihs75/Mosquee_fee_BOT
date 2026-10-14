@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 from db import Database
-from domain import DomainError, ExpenseInput, calculate_carpet_amount, mission_expenses_total, parse_amount, parse_positive_number, profile_link
+from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, calculate_carpet_amount, calculate_day_fee, format_duration_days, mission_expenses_total, parse_amount, parse_day_equivalents, parse_positive_number, profile_link
 from excel_export import build_confirmed_workbook, build_history_workbook
 from formatting import request_summary, status_text, user_summary
 
@@ -97,9 +97,9 @@ def key_for(update: Update) -> tuple[int, int]:
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("إنشاء طلب استرجاع مصاريف", callback_data="u:new")],
+        [InlineKeyboardButton("إضافة مهمة جديدة", callback_data="u:new")],
         [InlineKeyboardButton("طلباتي", callback_data="u:list")],
-        [InlineKeyboardButton("إعادة التسجيل بمساعدة الإدارة", callback_data="u:help")],
+        [InlineKeyboardButton("تغيير الاسم للطلبات الجديدة", callback_data="u:change_name")],
     ])
 
 
@@ -135,7 +135,7 @@ def admin_fields_keyboard(row: dict[str, Any]) -> InlineKeyboardMarkup:
     request_id = int(row["id"])
     fields = [
         ("اسم المسجد / المهمة", "mosque_name"), ("الولاية", "wilaya"), ("البلدية", "baladiya"),
-        ("مدة المهمة", "duration_text"), ("المسؤول", "responsable"), ("نوع السجاد", "carpet_type"),
+        ("عدد الأيام (نصف يوم)", "duration_days"), ("المسؤول", "responsable"), ("نوع السجاد", "carpet_type"),
         ("المساحة", "carpet_area"), ("Feutre", "has_feutre"), ("سعر المتر", "carpet_rate"),
         ("مبلغ السجاد", "carpet_amount"),
     ]
@@ -245,7 +245,7 @@ async def notify_cashier(context: ContextTypes.DEFAULT_TYPE, row: dict[str, Any]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not private_chat(update):
         if await is_admin_member(update, context):
-            await update.effective_message.reply_text("أوامر الإدارة متاحة عبر /users و /export و /help_admin.")
+            await update.effective_message.reply_text("أوامر الإدارة متاحة عبر /users و /export و /history و /help_admin.")
         return
     user = update.effective_user
     assert user is not None
@@ -254,7 +254,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pending[key_for(update)] = {"mode": "register"}
         await update.effective_message.reply_text(
             "مرحباً. هذا بوت خاص لتسجيل طلبات استرجاع مصاريف المهام.\n\n"
-            "أرسل اسمك الرسمي كما يجب أن يظهر في السجلات. بعد التسجيل لا يمكنك تغييره بنفسك، ويستطيع تعديلَه أعضاء مجموعة الإدارة فقط."
+            "أرسل اسمك الرسمي كما يجب أن يظهر في السجلات. يمكنك تغيير الاسم لاحقاً من القائمة، وسيُستخدم الاسم الجديد في الطلبات القادمة فقط."
         )
         return
     DB.touch_user(user.id, user.username, profile_link(user.id, user.username))
@@ -310,7 +310,7 @@ async def ask_next_request_field(update: Update, context: ContextTypes.DEFAULT_T
         "mosque": "أرسل اسم المسجد أو المهمة.",
         "location": "أرسل الولاية والبلدية مفصولتين بفاصلة أو بمسافتين، أو أرسل الولاية فقط وسأطلب البلدية.",
         "baladiya": "أرسل اسم البلدية.",
-        "duration": "أرسل مدة المهمة.",
+        "duration": "أرسل عدد الأيام كرقم، مثل 1 أو 1.5 أو 0.5. الرسوم 700 دج لليوم و350 دج لنصف اليوم.",
         "responsable": "اختر المسؤول من القائمة.",
         "carpet_type": "أرسل نوع سجاد المسجد كنص حر.",
         "carpet_area": "أرسل المساحة المفرشة بالمتر المربع.",
@@ -328,12 +328,14 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         rates = DB.get_carpet_rates()
         area = Decimal(str(data["carpet_area"]))
         has_feutre = bool(data["has_feutre"])
+        duration_days = Decimal(str(data["duration_days"]))
         rate = rates[1] if has_feutre else rates[0]
         carpet_amount = calculate_carpet_amount(area, has_feutre, rates[0], rates[1])
         items = tuple({**item, "amount": Decimal(str(item["amount"]))} for item in data.get("mission_expenses", []))
-        total = (carpet_amount + mission_expenses_total(items)).quantize(Decimal("0.01"))
+        total = (calculate_day_fee(duration_days, DAILY_MISSION_RATE) + carpet_amount + mission_expenses_total(items)).quantize(Decimal("0.01"))
         expense = ExpenseInput(
             mosque_name=data["mosque_name"], wilaya=data["wilaya"], baladiya=data["baladiya"], duration_text=data["duration_text"],
+            duration_days=duration_days, day_fee_rate=DAILY_MISSION_RATE,
             responsable=data["responsable"], carpet_type=data["carpet_type"], carpet_area=area, has_feutre=has_feutre,
             carpet_rate=rate, carpet_amount=carpet_amount, mission_expenses=items, amount_requested=total,
             currency="DZD", additional_details="",
@@ -361,6 +363,16 @@ async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     message = update.effective_message
     text = (message.text or "").strip()
+    if state.get("mode") == "user_rename":
+        user = update.effective_user
+        assert user is not None
+        try:
+            DB.update_user_name(user.id, text, user.id, actor_name(update))
+            pending.pop(key_for(update), None)
+            await message.reply_text("تم تحديث الاسم. سيظهر الاسم الجديد في الطلبات القادمة فقط، وستبقى الطلبات السابقة باسمها المسجل وقت إنشائها.", reply_markup=main_menu())
+        except DomainError as exc:
+            await message.reply_text(str(exc))
+        return
     if state["mode"] == "register":
         try:
             user = update.effective_user
@@ -389,7 +401,13 @@ async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         state["data"]["baladiya"] = text
         state["step"] = "duration"
     elif step == "duration":
-        state["data"]["duration_text"] = text
+        try:
+            duration_days = parse_day_equivalents(text)
+        except DomainError as exc:
+            await message.reply_text(str(exc))
+            return
+        state["data"]["duration_days"] = str(duration_days)
+        state["data"]["duration_text"] = format_duration_days(duration_days)
         state["step"] = "responsable"
     elif step == "responsable":
         await message.reply_text("اختر المسؤول من القائمة.", reply_markup=user_step_keyboard(state))
@@ -567,6 +585,14 @@ async def user_callback(query, context: ContextTypes.DEFAULT_TYPE, action: str, 
         pending[(chat.id, user.id)] = {"mode": "new_request", "step": "mosque", "data": {}}
         await query.message.reply_text("أرسل اسم المسجد أو اسم المهمة التي صُرفت عليها المصاريف.")
         return
+    if action == "change_name":
+        db_user = DB.get_user(user.id)
+        if not db_user or db_user["status"] != "active":
+            await query.message.reply_text("يجب تفعيل حسابك أولاً لتغيير الاسم.")
+            return
+        pending[(chat.id, user.id)] = {"mode": "user_rename"}
+        await query.message.reply_text("أرسل الاسم الرسمي الجديد. سيُستخدم في الطلبات الجديدة فقط، ولن يتغير اسمك في الطلبات السابقة.")
+        return
     if action == "responsable":
         state = pending.get((chat.id, user.id))
         if not state or state.get("step") != "responsable":
@@ -600,10 +626,10 @@ async def user_callback(query, context: ContextTypes.DEFAULT_TYPE, action: str, 
         if not rows:
             await query.message.reply_text("لا توجد طلبات مسجلة لك.")
         else:
-            await query.message.reply_text("\n\n".join(request_summary({**row, "full_name": DB.get_user(user.id)["full_name"], "username": DB.get_user(user.id).get("username")}) for row in rows), parse_mode=ParseMode.HTML)
+            await query.message.reply_text("\n\n".join(request_summary(row) for row in rows), parse_mode=ParseMode.HTML)
         return
     if action == "help":
-        await query.message.reply_text("لا يمكنك تعديل الاسم بنفسك. اطلب من عضو الإدارة تنفيذ ذلك من مجموعة الإدارة.")
+        await query.message.reply_text("استخدم زر «تغيير الاسم للطلبات الجديدة» لتحديث اسمك الرسمي للطلبات القادمة.")
         return
     if not args:
         return
@@ -783,6 +809,8 @@ async def group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 value = normalized in {"نعم", "yes", "1"}
             elif field in {"carpet_area", "carpet_rate", "carpet_amount"}:
                 value = parse_positive_number(text, field)
+            elif field in {"duration_days", "duration_text"}:
+                value = parse_day_equivalents(text)
             elif field == "responsable" and text not in DB.get_responsables():
                 await update.effective_message.reply_text("اختر اسماً موجوداً في قائمة المسؤولين أو حدّث القائمة أولاً بالأمر /set_responsables.")
                 return
@@ -814,14 +842,16 @@ async def group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return
             parts = [part.strip() for part in text.split("|", 4)]
             if len(parts) < 4:
-                await update.effective_message.reply_text("الصيغة المطلوبة: اسم المسجد | الولاية | المدة | المبلغ | الملاحظات الاختيارية")
+                await update.effective_message.reply_text("الصيغة المطلوبة: اسم المسجد | الولاية | عدد الأيام (مثل 1.5) | المبلغ | الملاحظات الاختيارية")
                 return
+            duration_days = parse_day_equivalents(parts[2])
             expense = ExpenseInput(
                 mosque_name=parts[0],
                 wilaya=parts[1],
-                duration_text=parts[2],
+                duration_text=format_duration_days(duration_days),
                 amount_requested=Decimal(parts[3].replace(",", ".")),
                 currency="DZD",
+                duration_days=duration_days,
                 additional_details=parts[4] if len(parts) == 5 else "",
             )
             request_id = int(state["request_id"])

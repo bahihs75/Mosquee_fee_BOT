@@ -12,7 +12,7 @@ import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import Json, RealDictCursor
 
-from domain import DomainError, ExpenseInput, Status, snapshot_from_input, transition, validate_cumulative_payment, validate_expense, validate_payment
+from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, Status, calculate_day_fee, format_duration_days, parse_day_equivalents, snapshot_from_input, transition, validate_cumulative_payment, validate_expense, validate_payment
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -155,7 +155,9 @@ class Database:
     def get_user_requests(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM expense_requests WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
+                "SELECT r.*,COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name,u.username,u.profile_link "
+                "FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id "
+                "WHERE r.user_id=%s ORDER BY r.created_at DESC LIMIT %s",
                 (user_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
@@ -213,13 +215,14 @@ class Database:
         validated = validate_expense(data)
         snapshot = snapshot_from_input(validated)
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT 1 FROM users WHERE telegram_user_id=%s AND status='active'", (user_id,))
-            if not cur.fetchone():
+            cur.execute("SELECT full_name FROM users WHERE telegram_user_id=%s AND status='active'", (user_id,))
+            user_row = cur.fetchone()
+            if not user_row:
                 raise DomainError("يجب تسجيل المستخدم وتفعيله قبل إنشاء الطلب.")
             cur.execute(
-                "INSERT INTO expense_requests(public_id,user_id,status,version_no,mosque_name,wilaya,baladiya,mission_start_date,mission_end_date,duration_text,responsable,carpet_type,carpet_area,has_feutre,carpet_rate,carpet_amount,approval_stage,amount_requested,currency,additional_details) "
-                "VALUES('PENDING',%s,'submitted',1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s) RETURNING *",
-                (user_id, validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details),
+                "INSERT INTO expense_requests(public_id,user_id,status,version_no,requester_name,mosque_name,wilaya,baladiya,mission_start_date,mission_end_date,duration_text,duration_days,day_fee_rate,responsable,carpet_type,carpet_area,has_feutre,carpet_rate,carpet_amount,approval_stage,amount_requested,currency,additional_details) "
+                "VALUES('PENDING',%s,'submitted',1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s) RETURNING *",
+                (user_id, user_row["full_name"], validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.duration_days, validated.day_fee_rate, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details),
             )
             row = dict(cur.fetchone())
             public_id = f"EXP-{datetime.now(timezone.utc).year}-{row['id']:06d}"
@@ -289,7 +292,8 @@ class Database:
         cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM expense_items WHERE request_id=%s AND version_no=%s", (row["id"], row["version_no"]))
         items_total = Decimal(cur.fetchone()["total"] or 0)
         carpet_amount = Decimal(row.get("carpet_amount") or 0)
-        total = (carpet_amount + items_total).quantize(Decimal("0.01"))
+        day_fee = calculate_day_fee(row.get("duration_days"), Decimal(row["day_fee_rate"])) if row.get("duration_days") is not None and row.get("day_fee_rate") is not None else Decimal("0.00")
+        total = (carpet_amount + items_total + day_fee).quantize(Decimal("0.01"))
         cur.execute("UPDATE expense_requests SET amount_requested=%s,updated_at=NOW() WHERE id=%s RETURNING *", (total, row["id"]))
         return total
 
@@ -318,24 +322,30 @@ class Database:
             return updated
 
     def admin_edit_field(self, request_id: int, field: str, value: Any, actor_id: int, actor_name: str, reason: str = "") -> dict[str, Any]:
-        allowed = {"mosque_name", "wilaya", "baladiya", "duration_text", "responsable", "carpet_type", "carpet_area", "has_feutre", "carpet_rate", "carpet_amount"}
+        allowed = {"mosque_name", "wilaya", "baladiya", "duration_text", "duration_days", "responsable", "carpet_type", "carpet_area", "has_feutre", "carpet_rate", "carpet_amount"}
         if field not in allowed:
             raise DomainError("هذا الحقل لا يدعم التعديل المباشر.")
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             row = self._locked_request(cur, request_id)
             if row["status"] not in {Status.SUBMITTED.value, Status.RESUBMITTED.value, Status.REOPENED.value} or int(row.get("approval_stage") or 0) >= 3:
                 raise DomainError("لا يمكن تعديل الطلب بعد الاعتماد النهائي.")
-            value = str(value).strip() if field not in {"carpet_area", "carpet_rate", "carpet_amount", "has_feutre"} else value
+            value = str(value).strip() if field not in {"carpet_area", "carpet_rate", "carpet_amount", "has_feutre", "duration_days"} else value
             if field in {"mosque_name", "wilaya", "baladiya", "duration_text", "responsable", "carpet_type"}:
                 if len(str(value).strip()) < 1:
                     raise DomainError("القيمة الجديدة لا يمكن أن تكون فارغة.")
+            if field in {"duration_text", "duration_days"}:
+                value = parse_day_equivalents(value)
+                updates = {"duration_days": value, "duration_text": format_duration_days(value), "day_fee_rate": DAILY_MISSION_RATE}
+            else:
+                updates = {field: value}
             if field in {"carpet_area", "carpet_rate", "carpet_amount"}:
                 value = Decimal(str(value).replace(",", ".")).quantize(Decimal("0.01"))
                 if value <= 0:
                     raise DomainError("القيمة يجب أن تكون أكبر من الصفر.")
+                updates[field] = value
             if field == "has_feutre":
                 value = bool(value)
-            updates = {field: value}
+                updates[field] = value
             if field == "carpet_area":
                 updates["carpet_amount"] = (value * Decimal(row.get("carpet_rate") or (20 if row.get("has_feutre") else 15))).quantize(Decimal("0.01"))
             elif field == "has_feutre" and row.get("carpet_area"):
@@ -408,7 +418,7 @@ class Database:
     def get_request(self, request_id: int) -> dict[str, Any] | None:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT r.*,u.full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.id=%s",
+                "SELECT r.*,COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.id=%s",
                 (request_id,),
             )
             row = cur.fetchone()
@@ -422,7 +432,7 @@ class Database:
     def get_request_by_public_id(self, public_id: str) -> dict[str, Any] | None:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT r.*,u.full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.public_id=%s",
+                "SELECT r.*,COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.public_id=%s",
                 (public_id,),
             )
             row = cur.fetchone()
@@ -541,8 +551,8 @@ class Database:
                 raise DomainError("لا يمكن تعديل الطلب في حالته الحالية.")
             next_version = row["version_no"] + 1
             cur.execute(
-                "UPDATE expense_requests SET version_no=%s,mosque_name=%s,wilaya=%s,mission_start_date=%s,mission_end_date=%s,duration_text=%s,amount_requested=%s,currency=%s,additional_details=%s,updated_at=NOW() WHERE id=%s AND status=%s AND version_no=%s RETURNING *",
-                (next_version, validated.mosque_name, validated.wilaya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["status"], row["version_no"]),
+                "UPDATE expense_requests SET version_no=%s,mosque_name=%s,wilaya=%s,baladiya=%s,mission_start_date=%s,mission_end_date=%s,duration_text=%s,duration_days=%s,day_fee_rate=%s,responsable=%s,carpet_type=%s,carpet_area=%s,has_feutre=%s,carpet_rate=%s,carpet_amount=%s,amount_requested=%s,currency=%s,additional_details=%s,updated_at=NOW() WHERE id=%s AND status=%s AND version_no=%s RETURNING *",
+                (next_version, validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.duration_days, validated.day_fee_rate, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["status"], row["version_no"]),
             )
             updated = cur.fetchone()
             if not updated:
@@ -567,8 +577,8 @@ class Database:
                 raise DomainError("هذا الطلب لا ينتظر تعديلاً منك.")
             next_version = row["version_no"] + 1
             cur.execute(
-                "UPDATE expense_requests SET status='resubmitted',version_no=%s,mosque_name=%s,wilaya=%s,mission_start_date=%s,mission_end_date=%s,duration_text=%s,amount_requested=%s,currency=%s,additional_details=%s,updated_at=NOW() WHERE id=%s AND status='changes_requested' AND version_no=%s RETURNING *",
-                (next_version, validated.mosque_name, validated.wilaya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["version_no"]),
+                "UPDATE expense_requests SET status='resubmitted',version_no=%s,mosque_name=%s,wilaya=%s,baladiya=%s,mission_start_date=COALESCE(%s,mission_start_date),mission_end_date=COALESCE(%s,mission_end_date),duration_text=%s,duration_days=%s,day_fee_rate=%s,responsable=%s,carpet_type=%s,carpet_area=%s,has_feutre=%s,carpet_rate=%s,carpet_amount=%s,amount_requested=%s,currency=%s,additional_details=%s,updated_at=NOW() WHERE id=%s AND status='changes_requested' AND version_no=%s RETURNING *",
+                (next_version, validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.duration_days, validated.day_fee_rate, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["version_no"]),
             )
             updated = cur.fetchone()
             if not updated:
@@ -578,6 +588,7 @@ class Database:
                 "INSERT INTO request_versions(request_id,version_no,snapshot,created_by,source) VALUES(%s,%s,%s,%s,'user')",
                 (row["id"], next_version, Json(snapshot), user_id),
             )
+            self._insert_items(cur, row["id"], next_version, validated.mission_expenses)
             for attachment in attachments or []:
                 cur.execute(
                     "INSERT INTO attachments(request_id,version_no,telegram_file_id,telegram_file_unique_id,media_type,original_name) VALUES(%s,%s,%s,%s,%s,%s)",
@@ -650,7 +661,7 @@ class Database:
             return [dict(row) for row in cur.fetchall()]
 
     def confirmed_requests(self, start: date | None = None, end: date | None = None) -> list[dict[str, Any]]:
-        query = "SELECT r.*,u.full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.status='paid_confirmed'"
+        query = "SELECT r.*,COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name,u.username,u.profile_link FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id WHERE r.status='paid_confirmed'"
         params: list[Any] = []
         if start:
             query += " AND r.paid_at::date >= %s"
@@ -665,14 +676,40 @@ class Database:
 
     def history_requests(self) -> list[dict[str, Any]]:
         query = (
-            "SELECT r.*,u.full_name,u.username,u.profile_link "
+            "SELECT r.*,COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name,u.username,u.profile_link "
             "FROM expense_requests r JOIN users u ON u.telegram_user_id=r.user_id "
             "WHERE r.status NOT IN ('cancelled_by_admin','cancelled_by_user') "
-            "ORDER BY r.id"
+            "ORDER BY r.created_at,r.id"
         )
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query)
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+            if not rows:
+                return rows
+            request_ids = [int(row["id"]) for row in rows]
+            cur.execute(
+                "SELECT request_id,version_no,item_type,description,amount,currency "
+                "FROM expense_items WHERE request_id=ANY(%s) ORDER BY request_id,version_no,id",
+                (request_ids,),
+            )
+            items_by_version: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for item in cur.fetchall():
+                item = dict(item)
+                items_by_version.setdefault((int(item["request_id"]), int(item["version_no"])), []).append(item)
+            cur.execute(
+                "SELECT request_id,version_no,media_type,original_name FROM attachments "
+                "WHERE request_id=ANY(%s) ORDER BY request_id,version_no,id",
+                (request_ids,),
+            )
+            attachments_by_version: dict[tuple[int, int], list[dict[str, Any]]] = {}
+            for attachment in cur.fetchall():
+                attachment = dict(attachment)
+                attachments_by_version.setdefault((int(attachment["request_id"]), int(attachment["version_no"])), []).append(attachment)
+            for row in rows:
+                key = (int(row["id"]), int(row.get("version_no") or 1))
+                row["mission_expenses"] = items_by_version.get(key, [])
+                row["attachments"] = attachments_by_version.get(key, [])
+            return rows
 
     def pending_deliveries(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:

@@ -8,6 +8,7 @@ from domain import DomainError, Status, transition
 SCHEMA = Path(__file__).parents[1].joinpath("schema.sql").read_text(encoding="utf-8")
 APP_SOURCE = Path(__file__).parents[1].joinpath("app.py").read_text(encoding="utf-8")
 DB_SOURCE = Path(__file__).parents[1].joinpath("db.py").read_text(encoding="utf-8")
+DOMAIN_SOURCE = Path(__file__).parents[1].joinpath("domain.py").read_text(encoding="utf-8")
 
 
 def test_schema_preserves_registered_users_and_profile_links():
@@ -55,3 +56,28 @@ def test_history_export_is_admin_only_registered_and_omits_cancelled_requests():
     assert "هذا الأمر متاح فقط لأعضاء مجموعة الإدارة المضبوطة" in history_handler
     assert 'logger.exception("فشل تصدير سجل الطلبات")' in history_handler
     assert "WHERE r.status NOT IN ('cancelled_by_admin','cancelled_by_user')" in DB_SOURCE
+
+
+def test_day_fee_is_half_day_based_and_added_to_existing_components():
+    assert "duration_days NUMERIC(7,2)" in SCHEMA
+    assert "day_fee_rate NUMERIC(14,2)" in SCHEMA
+    assert "expense_requests_day_fee_rate_positive_check" in SCHEMA
+    assert "expense_requests_duration_days_half_day_check" in SCHEMA
+    assert 'DAILY_MISSION_RATE = Decimal("700")' in DOMAIN_SOURCE
+    assert "calculate_day_fee(duration_days, day_fee_rate)" in DOMAIN_SOURCE
+    assert "calculate_day_fee(row.get(\"duration_days\")" in DB_SOURCE
+
+
+def test_user_name_change_is_recorded_per_request_and_applies_to_new_requests():
+    assert 'callback_data="u:change_name"' in APP_SOURCE
+    assert 'action == "change_name"' in APP_SOURCE
+    assert "requester_name" in SCHEMA
+    assert "requester_name,mosque_name" in DB_SOURCE
+    assert "COALESCE(NULLIF(r.requester_name,''),u.full_name) AS full_name" in DB_SOURCE
+    assert "ستبقى الطلبات السابقة باسمها المسجل وقت إنشائها" in APP_SOURCE
+
+
+def test_history_export_loads_current_expense_items_and_attachments():
+    assert "تفاصيل مصاريف المهمة" in (Path(__file__).parents[1] / "excel_export.py").read_text(encoding="utf-8")
+    assert "FROM expense_items WHERE request_id=ANY(%s)" in DB_SOURCE
+    assert "FROM attachments " in DB_SOURCE
