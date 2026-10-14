@@ -713,7 +713,11 @@ class Database:
 
     def pending_deliveries(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM delivery_messages WHERE status IN ('pending','failed') ORDER BY created_at LIMIT %s", (limit,))
+            cur.execute(
+                "SELECT * FROM delivery_messages WHERE status IN ('pending','failed') "
+                "AND COALESCE(payload->>'text','') NOT LIKE %s ORDER BY created_at LIMIT %s",
+                ("<b>تنبيه: طلب متأخر عن المعالجة</b>%", limit),
+            )
             return [dict(row) for row in cur.fetchall()]
 
     def record_delivery(self, request_id: int | None, recipient_user_id: int | None, recipient_chat_id: int, channel: str, message_kind: str, payload: dict[str, Any]) -> int:
@@ -735,11 +739,3 @@ class Database:
                 (status, error, status, delivery_id),
             )
             conn.commit()
-
-    def pending_expired_requests(self, stale_hours: int) -> list[dict[str, Any]]:
-        with self.connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM expense_requests WHERE status IN ('submitted','resubmitted','payment_rejected') AND updated_at < NOW() - (%s || ' hours')::interval",
-                (stale_hours,),
-            )
-            return [dict(row) for row in cur.fetchall()]

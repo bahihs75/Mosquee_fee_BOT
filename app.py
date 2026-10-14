@@ -933,16 +933,6 @@ async def retry_deliveries(context: ContextTypes.DEFAULT_TYPE) -> None:
             DB.mark_delivery(int(delivery["id"]), "failed", str(exc)[:1000])
 
 
-async def expire_stale(context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        stale_hours = int(DB.get_setting("stale_hours", "72") or "72")
-    except ValueError:
-        stale_hours = 72
-    for row in DB.pending_expired_requests(stale_hours):
-        # لا نغير الحالة تلقائياً كي لا نغلق طلباً مالياً دون رؤية بشرية؛ نرسل تنبيهاً للإدارة.
-        await notify_admin_group(context, row, "<b>تنبيه: طلب متأخر عن المعالجة</b>\n\n" + request_summary(row))
-
-
 async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": "telegram-reimbursement-bot"})
 
@@ -992,7 +982,6 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_text))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_text))
     app.job_queue.run_repeating(retry_deliveries, interval=60, first=30, name="retry-deliveries")
-    app.job_queue.run_repeating(expire_stale, interval=3600, first=600, name="stale-notifications")
     return app
 
 

@@ -81,3 +81,12 @@ def test_history_export_loads_current_expense_items_and_attachments():
     assert "تفاصيل مصاريف المهمة" in (Path(__file__).parents[1] / "excel_export.py").read_text(encoding="utf-8")
     assert "FROM expense_items WHERE request_id=ANY(%s)" in DB_SOURCE
     assert "FROM attachments " in DB_SOURCE
+
+
+def test_overdue_reminder_is_removed_but_failed_delivery_retry_remains():
+    assert "async def expire_stale" not in APP_SOURCE
+    assert 'name="stale-notifications"' not in APP_SOURCE
+    assert 'run_repeating(retry_deliveries' in APP_SOURCE
+    assert "pending_expired_requests" not in DB_SOURCE
+    assert "NOT LIKE %s ORDER BY created_at LIMIT %s" in DB_SOURCE
+    assert "تنبيه: طلب متأخر عن المعالجة" in DB_SOURCE

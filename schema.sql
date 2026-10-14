@@ -219,7 +219,6 @@ INSERT INTO app_settings (key, value) VALUES
     ('default_currency', 'DZD'),
     ('allow_partial_payment', 'false'),
     ('require_attachment', 'false'),
-    ('stale_hours', '72'),
     ('responsables', 'Ammar redouan|ahmed lasaakeur'),
     ('carpet_rate_without_feutre', '15'),
     ('carpet_rate_with_feutre', '20')
