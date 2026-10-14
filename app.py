@@ -177,6 +177,9 @@ def user_request_keyboard(request_id: int, status: str) -> InlineKeyboardMarkup 
     return None
 
 
+OVERDUE_REMINDER_PREFIX = "<b>تنبيه: طلب متأخر عن المعالجة</b>"
+
+
 async def deliver_text(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
@@ -188,6 +191,9 @@ async def deliver_text(
     reply_markup: InlineKeyboardMarkup | None = None,
     thread_id: int | None = None,
 ) -> bool:
+    if text.startswith(OVERDUE_REMINDER_PREFIX):
+        logger.info("تم تجاهل تذكير الطلب المتأخر القديم للطلب %s", request_id)
+        return False
     delivery_id = DB.record_delivery(request_id, recipient_user_id, chat_id, channel, message_kind, {"text": text, "request_id": request_id})
     try:
         await context.bot.send_message(
@@ -917,6 +923,9 @@ async def retry_deliveries(context: ContextTypes.DEFAULT_TYPE) -> None:
         text = payload.get("text")
         request_id = payload.get("request_id")
         if not text:
+            continue
+        if text.startswith(OVERDUE_REMINDER_PREFIX):
+            logger.info("تم تجاهل إعادة إرسال تذكير الطلب المتأخر القديم للطلب %s", request_id)
             continue
         reply_markup = None
         row = DB.get_request(int(request_id)) if request_id else None

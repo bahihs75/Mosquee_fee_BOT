@@ -87,6 +87,8 @@ def test_overdue_reminder_is_removed_but_failed_delivery_retry_remains():
     assert "async def expire_stale" not in APP_SOURCE
     assert 'name="stale-notifications"' not in APP_SOURCE
     assert 'run_repeating(retry_deliveries' in APP_SOURCE
+    assert 'OVERDUE_REMINDER_PREFIX = "<b>تنبيه: طلب متأخر عن المعالجة</b>"' in APP_SOURCE
+    assert APP_SOURCE.count("text.startswith(OVERDUE_REMINDER_PREFIX)") == 2
     assert "pending_expired_requests" not in DB_SOURCE
     assert "NOT LIKE %s ORDER BY created_at LIMIT %s" in DB_SOURCE
     assert "تنبيه: طلب متأخر عن المعالجة" in DB_SOURCE
