@@ -219,7 +219,17 @@ INSERT INTO app_settings (key, value) VALUES
     ('default_currency', 'DZD'),
     ('allow_partial_payment', 'false'),
     ('require_attachment', 'false'),
-    ('responsables', 'Ammar redouan|ahmed lasaakeur'),
+    ('responsables', 'Ammar redouan|ahmed lasaakeur|Depot'),
     ('carpet_rate_without_feutre', '15'),
     ('carpet_rate_with_feutre', '20')
 ON CONFLICT (key) DO NOTHING;
+
+UPDATE app_settings
+SET value = CASE WHEN value = '' THEN 'Depot' ELSE value || '|Depot' END,
+    updated_at = NOW()
+WHERE key = 'responsables'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM unnest(string_to_array(app_settings.value, '|')) AS responsible(name)
+      WHERE lower(trim(responsible.name)) = 'depot'
+  );

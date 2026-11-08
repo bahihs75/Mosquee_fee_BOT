@@ -243,7 +243,7 @@ class Database:
             return row
 
     def get_responsables(self) -> list[str]:
-        raw = self.get_setting("responsables", "Ammar redouan|ahmed lasaakeur") or ""
+        raw = self.get_setting("responsables", "Ammar redouan|ahmed lasaakeur|Depot") or ""
         return [item.strip() for item in raw.split("|") if item.strip()]
 
     def set_responsables(self, names: list[str], actor_id: int, actor_name: str) -> None:

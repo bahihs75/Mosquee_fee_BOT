@@ -92,3 +92,12 @@ def test_overdue_reminder_is_removed_but_failed_delivery_retry_remains():
     assert "pending_expired_requests" not in DB_SOURCE
     assert "NOT LIKE %s ORDER BY created_at LIMIT %s" in DB_SOURCE
     assert "تنبيه: طلب متأخر عن المعالجة" in DB_SOURCE
+
+
+def test_depot_is_added_to_responsible_options_without_overwriting_custom_names():
+    assert '"Ammar redouan|ahmed lasaakeur|Depot"' in DB_SOURCE
+    assert "('responsables', 'Ammar redouan|ahmed lasaakeur|Depot')" in SCHEMA
+    migration = SCHEMA[SCHEMA.index("UPDATE app_settings\nSET value = CASE"):]
+    assert "WHERE key = 'responsables'" in migration
+    assert "value || '|Depot'" in migration
+    assert "lower(trim(responsible.name)) = 'depot'" in migration
