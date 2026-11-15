@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Iterable
@@ -110,6 +110,24 @@ def parse_day_equivalents(raw: str | Decimal | int | float) -> Decimal:
     if days * 2 != (days * 2).to_integral_value():
         raise DomainError("تُحتسب المدة بمضاعفات نصف يوم فقط، مثل 0.5 أو 1 أو 1.5.")
     return days.quantize(Decimal("0.01"))
+
+
+def parse_mission_start_date(raw: str) -> date:
+    value = (raw or "").strip()
+    for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, date_format).date()
+        except ValueError:
+            continue
+    raise DomainError("أدخل تاريخ بداية التفريش بصيغة YYYY-MM-DD أو DD/MM/YYYY، مثل 2026-11-15.")
+
+
+def calculate_mission_end_date(start_date: date, duration_days: Decimal) -> date:
+    days = parse_day_equivalents(duration_days)
+    if days > Decimal("366"):
+        raise DomainError("مدة المهمة لا يمكن أن تتجاوز 366 يوماً عند حساب تاريخ النهاية.")
+    # التاريخ لا يخزن الساعة؛ لذلك تُعرض النهاية كتاريخ اليوم الذي تقع فيه.
+    return start_date + timedelta(days=float(days))
 
 
 def format_duration_days(days: Decimal) -> str:

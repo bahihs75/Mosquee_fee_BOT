@@ -1,8 +1,9 @@
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
-from domain import DomainError, ExpenseInput, Status, calculate_day_fee, parse_amount, parse_day_equivalents, transition, validate_cumulative_payment, validate_expense, validate_payment
+from domain import DomainError, ExpenseInput, Status, calculate_day_fee, calculate_mission_end_date, parse_amount, parse_day_equivalents, parse_mission_start_date, transition, validate_cumulative_payment, validate_expense, validate_payment
 
 
 def test_admin_can_request_changes_from_submitted():
@@ -57,6 +58,32 @@ def test_day_equivalents_support_full_and_half_days_at_700_dzd_per_day():
 def test_day_equivalents_reject_invalid_or_non_half_day_values(value):
     with pytest.raises(DomainError):
         parse_day_equivalents(value)
+
+
+def test_mission_start_date_accepts_iso_and_day_first_formats():
+    assert parse_mission_start_date("2026-11-15") == date(2026, 11, 15)
+    assert parse_mission_start_date("15/11/2026") == date(2026, 11, 15)
+    assert parse_mission_start_date("15-11-2026") == date(2026, 11, 15)
+
+
+def test_mission_start_date_rejects_invalid_dates():
+    with pytest.raises(DomainError):
+        parse_mission_start_date("2026-02-30")
+
+
+@pytest.mark.parametrize(("days", "expected"), [
+    (Decimal("0.5"), date(2026, 11, 15)),
+    (Decimal("1"), date(2026, 11, 16)),
+    (Decimal("1.5"), date(2026, 11, 16)),
+    (Decimal("2"), date(2026, 11, 17)),
+])
+def test_mission_end_date_adds_duration_to_start_date(days, expected):
+    assert calculate_mission_end_date(date(2026, 11, 15), days) == expected
+
+
+def test_mission_end_date_rejects_durations_over_one_year():
+    with pytest.raises(DomainError):
+        calculate_mission_end_date(date(2026, 11, 15), Decimal("367"))
 
 
 def test_validated_request_total_adds_day_fee_to_carpet_and_itemized_expenses():

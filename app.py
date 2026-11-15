@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 from db import Database
-from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, calculate_carpet_amount, calculate_day_fee, format_duration_days, mission_expenses_total, parse_amount, parse_day_equivalents, parse_positive_number, profile_link
+from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, calculate_carpet_amount, calculate_day_fee, calculate_mission_end_date, format_duration_days, mission_expenses_total, parse_amount, parse_day_equivalents, parse_mission_start_date, parse_positive_number, profile_link
 from excel_export import build_confirmed_workbook, build_history_workbook
 from formatting import request_summary, status_text, user_summary
 
@@ -316,7 +316,8 @@ async def ask_next_request_field(update: Update, context: ContextTypes.DEFAULT_T
         "mosque": "أرسل اسم المسجد أو المهمة.",
         "location": "أرسل الولاية والبلدية مفصولتين بفاصلة أو بمسافتين، أو أرسل الولاية فقط وسأطلب البلدية.",
         "baladiya": "أرسل اسم البلدية.",
-        "duration": "أرسل عدد الأيام كرقم، مثل 1 أو 1.5 أو 0.5. الرسوم 700 دج لليوم و350 دج لنصف اليوم.",
+        "mission_start_date": "أرسل تاريخ بداية التفريش بصيغة YYYY-MM-DD أو DD/MM/YYYY، مثل 2026-11-15.",
+        "duration": "أرسل عدد الأيام كرقم، مثل 1 أو 1.5 أو 0.5. الرسوم 700 دج لليوم و350 دج لنصف اليوم، وسيحسب البوت تاريخ النهاية.",
         "responsable": "اختر المسؤول من القائمة.",
         "carpet_type": "أرسل نوع سجاد المسجد كنص حر.",
         "carpet_area": "أرسل المساحة المفرشة بالمتر المربع.",
@@ -342,6 +343,7 @@ async def finalize_request(update: Update, context: ContextTypes.DEFAULT_TYPE, s
         expense = ExpenseInput(
             mosque_name=data["mosque_name"], wilaya=data["wilaya"], baladiya=data["baladiya"], duration_text=data["duration_text"],
             duration_days=duration_days, day_fee_rate=DAILY_MISSION_RATE,
+            mission_start_date=data["mission_start_date"], mission_end_date=data["mission_end_date"],
             responsable=data["responsable"], carpet_type=data["carpet_type"], carpet_area=area, has_feutre=has_feutre,
             carpet_rate=rate, carpet_amount=carpet_amount, mission_expenses=items, amount_requested=total,
             currency="DZD", additional_details="",
@@ -399,22 +401,32 @@ async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parts = [part.strip() for part in re.split(r",|\\s{2,}", text) if part.strip()]
         if len(parts) >= 2:
             state["data"]["wilaya"], state["data"]["baladiya"] = parts[0], parts[1]
-            state["step"] = "duration"
+            state["step"] = "mission_start_date"
         else:
             state["data"]["wilaya"] = text
             state["step"] = "baladiya"
     elif step == "baladiya":
         state["data"]["baladiya"] = text
+        state["step"] = "mission_start_date"
+    elif step == "mission_start_date":
+        try:
+            state["data"]["mission_start_date"] = parse_mission_start_date(text)
+        except DomainError as exc:
+            await message.reply_text(str(exc))
+            return
         state["step"] = "duration"
     elif step == "duration":
         try:
             duration_days = parse_day_equivalents(text)
+            mission_end_date = calculate_mission_end_date(state["data"]["mission_start_date"], duration_days)
         except DomainError as exc:
             await message.reply_text(str(exc))
             return
         state["data"]["duration_days"] = str(duration_days)
         state["data"]["duration_text"] = format_duration_days(duration_days)
+        state["data"]["mission_end_date"] = mission_end_date
         state["step"] = "responsable"
+        await message.reply_text(f"تاريخ نهاية التفريش المحسوب: {mission_end_date.isoformat()}")
     elif step == "responsable":
         await message.reply_text("اختر المسؤول من القائمة.", reply_markup=user_step_keyboard(state))
         return

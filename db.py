@@ -12,7 +12,7 @@ import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import Json, RealDictCursor
 
-from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, Status, calculate_day_fee, format_duration_days, parse_day_equivalents, snapshot_from_input, transition, validate_cumulative_payment, validate_expense, validate_payment
+from domain import DAILY_MISSION_RATE, DomainError, ExpenseInput, Status, calculate_day_fee, calculate_mission_end_date, format_duration_days, parse_day_equivalents, snapshot_from_input, transition, validate_cumulative_payment, validate_expense, validate_payment
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -336,6 +336,8 @@ class Database:
             if field in {"duration_text", "duration_days"}:
                 value = parse_day_equivalents(value)
                 updates = {"duration_days": value, "duration_text": format_duration_days(value), "day_fee_rate": DAILY_MISSION_RATE}
+                if row.get("mission_start_date"):
+                    updates["mission_end_date"] = calculate_mission_end_date(row["mission_start_date"], value)
             else:
                 updates = {field: value}
             if field in {"carpet_area", "carpet_rate", "carpet_amount"}:
@@ -549,10 +551,20 @@ class Database:
             row = self._locked_request(cur, request_id)
             if row["status"] not in {Status.SUBMITTED.value, Status.RESUBMITTED.value, Status.REOPENED.value}:
                 raise DomainError("لا يمكن تعديل الطلب في حالته الحالية.")
+            mission_start_date = validated.mission_start_date or row.get("mission_start_date")
+            mission_end_date = validated.mission_end_date or (
+                calculate_mission_end_date(mission_start_date, validated.duration_days)
+                if mission_start_date and validated.duration_days is not None
+                else row.get("mission_end_date")
+            )
+            if mission_start_date:
+                snapshot["mission_start_date"] = mission_start_date.isoformat()
+            if mission_end_date:
+                snapshot["mission_end_date"] = mission_end_date.isoformat()
             next_version = row["version_no"] + 1
             cur.execute(
                 "UPDATE expense_requests SET version_no=%s,mosque_name=%s,wilaya=%s,baladiya=%s,mission_start_date=%s,mission_end_date=%s,duration_text=%s,duration_days=%s,day_fee_rate=%s,responsable=%s,carpet_type=%s,carpet_area=%s,has_feutre=%s,carpet_rate=%s,carpet_amount=%s,amount_requested=%s,currency=%s,additional_details=%s,updated_at=NOW() WHERE id=%s AND status=%s AND version_no=%s RETURNING *",
-                (next_version, validated.mosque_name, validated.wilaya, validated.baladiya, validated.mission_start_date, validated.mission_end_date, validated.duration_text, validated.duration_days, validated.day_fee_rate, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["status"], row["version_no"]),
+                (next_version, validated.mosque_name, validated.wilaya, validated.baladiya, mission_start_date, mission_end_date, validated.duration_text, validated.duration_days, validated.day_fee_rate, validated.responsable, validated.carpet_type, validated.carpet_area, validated.has_feutre, validated.carpet_rate, validated.carpet_amount, validated.amount_requested, validated.currency, validated.additional_details, row["id"], row["status"], row["version_no"]),
             )
             updated = cur.fetchone()
             if not updated:

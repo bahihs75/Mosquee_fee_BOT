@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from domain import DomainError, Status, transition
+from excel_export import HEADERS, HISTORY_HEADERS
 
 
 SCHEMA = Path(__file__).parents[1].joinpath("schema.sql").read_text(encoding="utf-8")
@@ -101,3 +102,15 @@ def test_depot_is_added_to_responsible_options_without_overwriting_custom_names(
     assert "WHERE key = 'responsables'" in migration
     assert "value || '|Depot'" in migration
     assert "lower(trim(responsible.name)) = 'depot'" in migration
+
+
+def test_start_date_is_requested_end_date_calculated_and_both_exports_include_it():
+    assert '"mission_start_date": "أرسل تاريخ بداية التفريش' in APP_SOURCE
+    assert "parse_mission_start_date(text)" in APP_SOURCE
+    assert "calculate_mission_end_date(state[\"data\"][\"mission_start_date\"], duration_days)" in APP_SOURCE
+    assert "mission_start_date=data[\"mission_start_date\"]" in APP_SOURCE
+    assert "mission_end_date=data[\"mission_end_date\"]" in APP_SOURCE
+    assert "تاريخ بداية التفريش" in HEADERS
+    assert "تاريخ نهاية التفريش" in HEADERS
+    assert "تاريخ بداية التفريش" in HISTORY_HEADERS
+    assert "تاريخ نهاية التفريش" in HISTORY_HEADERS

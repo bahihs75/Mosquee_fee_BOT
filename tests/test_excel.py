@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from openpyxl import load_workbook
@@ -14,6 +15,8 @@ def test_confirmed_workbook_contains_financial_columns():
             "user_id": 123,
             "mosque_name": "مسجد الاختبار",
             "wilaya": "الجزائر",
+            "mission_start_date": date(2026, 11, 15),
+            "mission_end_date": date(2026, 11, 18),
             "duration_text": "3 أيام",
             "amount_requested": Decimal("100.00"),
             "paid_amount": Decimal("100.00"),
@@ -30,6 +33,9 @@ def test_confirmed_workbook_contains_financial_columns():
     headers = [cell.value for cell in wb["الطلبات المؤكدة"][1]]
     assert "رابط ملف تيليغرام" in headers
     assert "المبلغ المدفوع" in headers
+    date_columns = {cell.value: cell.column for cell in wb["الطلبات المؤكدة"][1]}
+    assert wb["الطلبات المؤكدة"].cell(2, date_columns["تاريخ بداية التفريش"]).value == "2026-11-15"
+    assert wb["الطلبات المؤكدة"].cell(2, date_columns["تاريخ نهاية التفريش"]).value == "2026-11-18"
     assert wb["الطلبات المؤكدة"]["A2"].value == "EXP-2026-000001"
 
 
@@ -71,6 +77,8 @@ def test_history_workbook_shows_fee_formula_and_separate_expense_lines():
             "baladiya": "باب الوادي",
             "duration_text": "1.5 يوم",
             "duration_days": Decimal("1.50"),
+            "mission_start_date": date(2026, 11, 15),
+            "mission_end_date": date(2026, 11, 16),
             "day_fee_rate": Decimal("700.00"),
             "responsable": "مسؤول المهمة",
             "carpet_type": "صوف",
@@ -94,6 +102,8 @@ def test_history_workbook_shows_fee_formula_and_separate_expense_lines():
     assert ws.cell(2, headers["سعر اليوم (دج)"]).value == 700
     assert ws.cell(2, headers["رسم الأيام الإجمالي (دج)"]).value == 1050
     assert ws.cell(2, headers["حساب رسم الأيام"]).value == "1.5 × 700 = 1050 دج"
+    assert ws.cell(2, headers["تاريخ بداية التفريش"]).value == "2026-11-15"
+    assert ws.cell(2, headers["تاريخ نهاية التفريش"]).value == "2026-11-16"
     assert ws.cell(2, headers["البلدية"]).value == "باب الوادي"
     assert ws.cell(2, headers["نوع السجاد / الجودة"]).value == "صوف"
     assert ws.cell(2, headers["مبلغ السجاد (دج)"]).value == 200
